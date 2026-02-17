@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Withdraw - Certificate #{{ cert.id }}{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>Withdraw from Certificate #{{ cert.id }}</h1>
+<a href="{{ url_for('portal.certificate_detail', cert_id=cert.id) }}">&larr; Back to Certificate</a>
+
+<article>
+    <p><span class="badge badge-{{ cert.plan_type|lower }}">{{ cert.plan_type }}</span> {{ cert.plan_name }}</p>
+    <p>Total Value: <strong>R${{ "%.2f"|format(total_value) }}</strong> | Contributions: R${{ "%.2f"|format(total_contribs) }}</p>
+
+    {% if cert.tax_regime is none %}
+    <article style="border-left: 4px solid #ff9800; padding-left: 1em;">
+        <strong>Important:</strong> The first withdrawal will <strong>irrevocably lock</strong> your tax regime. You will still be able to make contributions after withdrawing. The certificate remains in the accumulation phase.
+    </article>
+    {% endif %}
+
+    <form method="post">
+        {% if cert.tax_regime is none %}
+        <article style="border-left: 4px solid #f44336; padding-left: 1em;">
+            <strong>Tax Regime Selection (IRREVOCABLE)</strong>
+            <p>You must choose a tax regime before your first withdrawal. This choice cannot be changed.</p>
+            <label>
+                <input type="radio" name="tax_regime" value="regressive" required>
+                <strong>Regressive</strong> &mdash; Rates decrease with time: 35% (0-2yr) down to 10% (>10yr). Better for long-term holdings. Tax is final (withheld at source).
+            </label>
+            <label>
+                <input type="radio" name="tax_regime" value="progressive">
+                <strong>Progressive</strong> &mdash; Standard IRPF brackets (0-27.5%). 15% withheld at source, adjusted in annual return. May be better for small withdrawals.
+            </label>
+        </article>
+        {% else %}
+        <p>Tax Regime: <strong>{{ cert.tax_regime }}</strong> (locked)</p>
+        {% endif %}
+
+        <label>
+            Withdrawal Amount (R$)
+            <input type="number" name="amount" id="withdraw-amount" step="0.01" min="0.01"
+                   max="{{ total_value }}" required placeholder="e.g. 10000.00"
+                   hx-get="{{ url_for('portal.tax_preview', cert_id=cert.id) }}"
+                   hx-trigger="keyup changed delay:500ms"
+                   hx-target="#tax-preview"
+                   hx-include="[name='amount']">
+        </label>
+
+        <div id="tax-preview">
+            <p>Enter an amount to see tax estimate.</p>
+        </div>
+
+        <button type="submit" onclick="return confirmAction('Confirm withdrawal? Tax regime will be locked irrevocably.')">Submit Withdrawal</button>
+        <small>Withdrawal will be processed on the next time evolution. Tax regime locks on first withdrawal but the certificate stays in accumulation.</small>
+    </form>
+</article>
+{% endblock %}

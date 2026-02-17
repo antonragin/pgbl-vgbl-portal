@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% block title %}Certificate #{{ cert.id }} - Admin{% endblock %}
+{% block nav_brand %}Admin Panel{% endblock %}
+
+{% block content %}
+<h1>Certificate #{{ cert.id }}</h1>
+<a href="{{ url_for('admin.user_detail', user_id=user_id) }}">&larr; Back to User</a>
+
+<p>
+    <span class="badge badge-{{ cert.plan_type|lower }}">{{ cert.plan_type }}</span>
+    {{ cert.plan_name }} |
+    Phase: <span class="badge badge-{{ cert.phase }}">{{ cert.phase }}</span> |
+    Tax Regime: <strong>{{ cert.tax_regime or 'Not chosen' }}</strong> |
+    Created: {{ cert.created_date }}
+</p>
+<p>
+    Total Value: <strong>R${{ "%.2f"|format(total_value) }}</strong> |
+    Total Contributions: R${{ "%.2f"|format(total_contribs) }} |
+    Cost Basis (Remaining): R${{ "%.2f"|format(total_remaining) }}
+</p>
+
+<h2>Holdings</h2>
+{% if holdings %}
+<table>
+    <thead><tr><th>Fund</th><th>Units</th><th>NAV</th><th>Value</th></tr></thead>
+    <tbody>
+    {% for h in holdings %}
+    <tr>
+        <td>{{ h.fund_name }}</td>
+        <td>{{ "%.6f"|format(h.units) }}</td>
+        <td>R${{ "%.4f"|format(h.current_nav) }}</td>
+        <td>R${{ "%.2f"|format(h.market_value) }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No holdings.</p>
+{% endif %}
+
+<article>
+    <header>Set Holding</header>
+    <form method="post">
+        <input type="hidden" name="action" value="set_holding">
+        <div class="grid">
+            <label>
+                Fund
+                <select name="fund_id" required>
+                    {% for f in funds %}
+                    <option value="{{ f.id }}">{{ f.name }} (NAV: R${{ "%.4f"|format(f.current_nav) }})</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>
+                Units
+                <input type="number" name="units" step="0.000001" min="0" required>
+            </label>
+            <label>&nbsp;<button type="submit">Set</button></label>
+        </div>
+    </form>
+</article>
+
+<article>
+    <header>Set Phase / Tax Regime</header>
+    <div class="grid">
+        <form method="post">
+            <input type="hidden" name="action" value="set_phase">
+            <fieldset role="group">
+                <select name="phase">
+                    <option value="accumulation" {{ 'selected' if cert.phase == 'accumulation' }}>Accumulation</option>
+                    <option value="spending" {{ 'selected' if cert.phase == 'spending' }}>Spending</option>
+                </select>
+                <button type="submit">Set Phase</button>
+            </fieldset>
+        </form>
+        <form method="post">
+            <input type="hidden" name="action" value="set_regime">
+            <fieldset role="group">
+                <select name="tax_regime">
+                    <option value="progressive" {{ 'selected' if cert.tax_regime == 'progressive' }}>Progressive</option>
+                    <option value="regressive" {{ 'selected' if cert.tax_regime == 'regressive' }}>Regressive</option>
+                </select>
+                <button type="submit">Set Regime</button>
+            </fieldset>
+        </form>
+    </div>
+</article>
+
+<h2>Contributions (Tax Lots)</h2>
+{% if contributions %}
+<table>
+    <thead><tr><th>ID</th><th>Date</th><th>Original</th><th>Remaining</th><th>Source</th></tr></thead>
+    <tbody>
+    {% for c in contributions %}
+    <tr{% if c.remaining_amount <= 0 %} style="opacity:0.4"{% endif %}>
+        <td>{{ c.id }}</td>
+        <td>{{ c.contribution_date }}</td>
+        <td>R${{ "%.2f"|format(c.amount) }}</td>
+        <td>R${{ "%.2f"|format(c.remaining_amount) }}</td>
+        <td>{{ c.source_type or 'contribution' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No contributions yet.</p>
+{% endif %}
+
+<article>
+    <header>Add Contribution</header>
+    <form method="post">
+        <input type="hidden" name="action" value="add_contribution">
+        <div class="grid">
+            <label>
+                Amount (R$)
+                <input type="number" name="amount" step="0.01" min="0.01" required>
+            </label>
+            <label>
+                Date
+                <input type="date" name="date" value="{{ sim_date }}">
+            </label>
+            <label>&nbsp;<button type="submit">Add</button></label>
+        </div>
+    </form>
+</article>
+
+<h2>Withdrawals</h2>
+{% if withdrawals %}
+<table>
+    <thead><tr><th>ID</th><th>Gross</th><th>Tax</th><th>Net</th><th>Date</th></tr></thead>
+    <tbody>
+    {% for w in withdrawals %}
+    <tr>
+        <td>{{ w.id }}</td>
+        <td>R${{ "%.2f"|format(w.gross_amount) }}</td>
+        <td>R${{ "%.2f"|format(w.tax_withheld) }}</td>
+        <td>R${{ "%.2f"|format(w.net_amount) }}</td>
+        <td>{{ w.withdrawal_date }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No withdrawals yet.</p>
+{% endif %}
+
+<article>
+    <header>Add Withdrawal (manual)</header>
+    <form method="post">
+        <input type="hidden" name="action" value="add_withdrawal">
+        <div class="grid">
+            <label>
+                Gross Amount
+                <input type="number" name="gross_amount" step="0.01" min="0.01" required>
+            </label>
+            <label>
+                Tax Withheld
+                <input type="number" name="tax_withheld" step="0.01" min="0" value="0">
+            </label>
+            <label>
+                Date
+                <input type="date" name="date" value="{{ sim_date }}">
+            </label>
+            <label>&nbsp;<button type="submit">Add</button></label>
+        </div>
+    </form>
+</article>
+
+{% if lot_allocations %}
+<h2>Lot Allocations (Audit Trail)</h2>
+<table style="font-size: 0.85em">
+    <thead><tr><th>ID</th><th>Type</th><th>Lot ID</th><th>Consumed</th><th>Age</th><th>Rate</th><th>Taxable</th><th>Tax</th><th>Date</th></tr></thead>
+    <tbody>
+    {% for la in lot_allocations %}
+    <tr>
+        <td>{{ la.id }}</td>
+        <td>{{ la.outflow_type }}</td>
+        <td>{{ la.contribution_id }}</td>
+        <td>R${{ "%.2f"|format(la.consumed_amount) }}</td>
+        <td>{{ la.months_held }}m</td>
+        <td>{{ "%.0f"|format(la.tax_rate * 100) }}%</td>
+        <td>R${{ "%.2f"|format(la.taxable_base) }}</td>
+        <td>R${{ "%.2f"|format(la.tax_amount) }}</td>
+        <td>{{ la.created_at }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+<h2>Requests</h2>
+{% if requests %}
+<table>
+    <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Created</th><th>Completed</th></tr></thead>
+    <tbody>
+    {% for r in requests %}
+    <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.type }}</td>
+        <td><span class="badge badge-{{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.created_date }}</td>
+        <td>{{ r.completed_date or '-' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No requests.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Plans & Funds{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>Available Plans</h1>
+<a href="{{ url_for('portal.home') }}">&larr; Dashboard</a>
+
+{% for p in plans %}
+<article>
+    <header><span class="badge badge-{{ p.type|lower }}">{{ p.type }}</span> {{ p.name }}</header>
+    <p>Code: {{ p.plan_code or 'N/A' }}</p>
+    {% if p.fees_info %}<p><small>{{ p.fees_info }}</small></p>{% endif %}
+    <a href="{{ url_for('portal.new_certificate') }}?plan_id={{ p.id }}" role="button" class="outline" style="padding:0.3em 0.8em;font-size:0.85em">Create Certificate</a>
+</article>
+{% endfor %}
+
+<h2>Available Funds</h2>
+<table>
+    <thead><tr><th>Name</th><th>CNPJ</th><th>Type</th><th>Current NAV</th><th></th></tr></thead>
+    <tbody>
+    {% for f in funds %}
+    <tr>
+        <td>{{ f.name }}</td>
+        <td>{{ f.cnpj or '-' }}</td>
+        <td>{{ 'Qualified' if f.is_qualified_only else 'Retail' }}</td>
+        <td>R${{ "%.4f"|format(f.current_nav) }}</td>
+        <td><a href="{{ url_for('portal.fund_detail', fund_id=f.id) }}">Details</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

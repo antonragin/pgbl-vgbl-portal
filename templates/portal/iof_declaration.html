@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}IOF Declaration{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>IOF Declaration &mdash; {{ year }}</h1>
+<a href="{{ url_for('portal.home') }}">&larr; Dashboard</a>
+
+<article style="border-left: 4px solid #42A5F5; padding-left: 1em;">
+    <strong>IOF Rule (Decree 12.499/2025):</strong>
+    <p>VGBL contributions exceeding R$600,000/year (across all issuers) are subject to 5% IOF. The IOF is deducted from the contribution amount before investing.</p>
+    <p>If you make VGBL contributions at other institutions, declare them here so the system can correctly calculate IOF on new contributions.</p>
+</article>
+
+<article>
+    <header>{{ year }} Summary</header>
+    <div class="grid">
+        <div>
+            <p>VGBL contributions here (this year): <strong>R${{ "%.2f"|format(internal_vgbl) }}</strong></p>
+            <p>Declared at other issuers: <strong>R${{ "%.2f"|format(current_declaration) }}</strong></p>
+        </div>
+        <div>
+            <p>Total VGBL contributions: <strong>R${{ "%.2f"|format(total) }}</strong></p>
+            <p>Remaining exempt: <strong style="color:{{ '#4CAF50' if remaining_exempt > 0 else '#f44336' }}">R${{ "%.2f"|format(remaining_exempt) }}</strong></p>
+            {% if total > 600000 %}
+            <p style="color:#f44336"><strong>Exceeded R$600,000 limit &mdash; 5% IOF applies to new VGBL contributions.</strong></p>
+            {% endif %}
+        </div>
+    </div>
+</article>
+
+<article>
+    <header>Update Declaration</header>
+    <form method="post">
+        <label>
+            VGBL contributions at other issuers in {{ year }} (R$)
+            <input type="number" name="declared_amount" step="0.01" min="0"
+                   value="{{ "%.2f"|format(current_declaration) }}"
+                   placeholder="e.g. 100000.00">
+        </label>
+        <small>Enter the total amount of VGBL contributions you have made (or plan to make) at other institutions during {{ year }}. This helps the system calculate IOF correctly.</small>
+        <button type="submit">Update Declaration</button>
+    </form>
+</article>
+{% endblock %}

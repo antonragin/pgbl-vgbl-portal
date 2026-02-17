@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}{{ fund.name }}{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>{{ fund.name }}</h1>
+<a href="{{ url_for('portal.browse_plans') }}">&larr; Back to Plans & Funds</a>
+
+<article>
+    <p><strong>CNPJ:</strong> {{ fund.cnpj or 'N/A' }}</p>
+    <p><strong>Type:</strong> {{ 'Qualified Only' if fund.is_qualified_only else 'Retail' }}</p>
+    <p><strong>Initial NAV:</strong> R${{ "%.4f"|format(fund.initial_nav) }}</p>
+    <p><strong>Current NAV:</strong> R${{ "%.4f"|format(fund.current_nav) }}</p>
+    {% if fund.description %}
+    <p><strong>Description:</strong> {{ fund.description }}</p>
+    {% endif %}
+</article>
+
+{% if returns %}
+<h2>Performance History</h2>
+<img src="{{ url_for('portal.fund_chart', fund_id=fund.id) }}" alt="Performance Chart" style="width:100%;max-width:800px">
+<table>
+    <thead><tr><th>Month</th><th>Return</th></tr></thead>
+    <tbody>
+    {% for r in returns %}
+    <tr>
+        <td>{{ r.month_idx + 1 }}</td>
+        <td style="color:{{ '#4CAF50' if r.return_pct >= 0 else '#f44336' }}">{{ "%.2f"|format(r.return_pct * 100) }}%</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

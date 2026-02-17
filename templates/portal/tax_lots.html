@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Tax Lots - Certificate #{{ cert.id }}{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>Tax Lots &mdash; Certificate #{{ cert.id }}</h1>
+<a href="{{ url_for('portal.certificate_detail', cert_id=cert.id) }}">&larr; Back to Certificate</a>
+
+<article>
+    <header>Summary</header>
+    <p>
+        <span class="badge badge-{{ cert.plan_type|lower }}">{{ cert.plan_type }}</span>
+        {{ cert.plan_name }}
+        {% if cert.tax_regime %} | Regime: <strong>{{ cert.tax_regime }}</strong>{% endif %}
+    </p>
+    <div class="grid">
+        <div>
+            <p>Total Value: <strong>R${{ "%.2f"|format(total_value) }}</strong></p>
+            <p>Cost Basis (Remaining): <strong>R${{ "%.2f"|format(total_remaining) }}</strong></p>
+        </div>
+        <div>
+            <p>Growth Factor: <strong>{{ "%.4f"|format(growth_factor) }}x</strong></p>
+            <p>Total Earnings: <strong style="color:#4CAF50">R${{ "%.2f"|format(total_value - total_remaining) }}</strong></p>
+        </div>
+    </div>
+</article>
+
+<article style="border-left: 4px solid #42A5F5; padding-left: 1em;">
+    <strong>How Tax Lots Work:</strong>
+    <ul>
+        <li><strong>Original Amount</strong>: what you contributed (or transferred in)</li>
+        <li><strong>Remaining Amount</strong>: cost basis left after partial withdrawals or transfers out (consumed FIFO)</li>
+        <li><strong>Current Value</strong>: estimated market value of this lot = remaining &times; growth factor</li>
+        <li><strong>Earnings</strong>: current value &minus; remaining (for VGBL, only earnings are taxed under regressive regime)</li>
+        <li><strong>Regressive Rate</strong>: based on the age of each lot (FIFO); rate drops over time</li>
+        <li>On withdrawal, the <strong>oldest lots are consumed first</strong> (FIFO). Tax is computed per lot.</li>
+    </ul>
+</article>
+
+{% if lots %}
+<table>
+    <thead>
+        <tr>
+            <th>Lot #</th>
+            <th>Date</th>
+            <th>Source</th>
+            <th>Original</th>
+            <th>Remaining</th>
+            <th>Current Value</th>
+            {% if cert.plan_type == 'VGBL' %}<th>Earnings</th>{% endif %}
+            <th>Age</th>
+            <th>Regressive Rate</th>
+            <th>Next Drop</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for lot in lots %}
+    <tr{% if lot.remaining_amount <= 0 %} style="opacity:0.4"{% endif %}>
+        <td>{{ lot.id }}</td>
+        <td>{{ lot.date }}</td>
+        <td>
+            {% if lot.source_type == 'transfer_internal' %}
+                <span style="color: #42A5F5">Transfer (internal)</span>
+            {% elif lot.source_type == 'transfer_external' %}
+                <span style="color: #ff9800">Transfer (external)</span>
+            {% else %}
+                Regular
+            {% endif %}
+        </td>
+        <td>R${{ "%.2f"|format(lot.original_amount) }}</td>
+        <td>R${{ "%.2f"|format(lot.remaining_amount) }}</td>
+        <td>R${{ "%.2f"|format(lot.current_value) }}</td>
+        {% if cert.plan_type == 'VGBL' %}
+        <td style="color:#4CAF50">R${{ "%.2f"|format(lot.earnings) }}</td>
+        {% endif %}
+        <td>{{ lot.months_held }} months</td>
+        <td>{{ "%.0f"|format(lot.current_rate * 100) }}%</td>
+        <td>
+            {% if lot.next_bracket %}
+                {{ "%.0f"|format(lot.next_bracket.rate * 100) }}% in {{ lot.next_bracket.months_until }} month(s)
+            {% else %}
+                <span style="color:#4CAF50">Minimum rate (10%)</span>
+            {% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No tax lots. <a href="{{ url_for('portal.contribute', cert_id=cert.id) }}">Make a contribution</a> to create the first lot.</p>
+{% endif %}
+{% endblock %}

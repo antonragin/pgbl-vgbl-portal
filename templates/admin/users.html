@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Users - Admin{% endblock %}
+{% block nav_brand %}Admin Panel{% endblock %}
+
+{% block content %}
+<h1>Users</h1>
+<a href="{{ url_for('admin.dashboard') }}">&larr; Dashboard</a>
+
+<article>
+    <header>Add User</header>
+    <form method="post">
+        <div class="grid">
+            <label>
+                Username (or email)
+                <input type="text" name="username" required placeholder="e.g. maria@example.com">
+            </label>
+            <label>
+                Investor Type
+                <select name="is_retail">
+                    <option value="1">Retail</option>
+                    <option value="0">Qualified</option>
+                </select>
+            </label>
+            <label>
+                &nbsp;
+                <button type="submit">Create User</button>
+            </label>
+        </div>
+    </form>
+</article>
+
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Username</th>
+            <th>Type</th>
+            <th>Created</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for u in users %}
+        <tr>
+            <td>{{ u.id }}</td>
+            <td><a href="{{ url_for('admin.user_detail', user_id=u.id) }}">{{ u.username }}</a></td>
+            <td>{{ 'Retail' if u.is_retail else 'Qualified' }}</td>
+            <td>{{ u.created_at }}</td>
+            <td>
+                <a href="{{ url_for('admin.edit_user', user_id=u.id) }}" style="font-size:0.8em">Edit</a>
+                <form method="post" action="{{ url_for('admin.delete_user', user_id=u.id) }}" style="margin:0;display:inline">
+                    <button type="submit" class="secondary outline" style="padding:0.2em 0.5em;font-size:0.8em"
+                            onclick="return confirmAction('Delete user {{ u.username }}?')">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5">No users yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

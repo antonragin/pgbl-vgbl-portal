@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Switch Funds - Certificate #{{ cert.id }}{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>Switch Funds - Certificate #{{ cert.id }}</h1>
+<a href="{{ url_for('portal.certificate_detail', cert_id=cert.id) }}">&larr; Back to Certificate</a>
+
+<article>
+    <p><span class="badge badge-{{ cert.plan_type|lower }}">{{ cert.plan_type }}</span> {{ cert.plan_name }}</p>
+    <p>Total Value: <strong>R${{ "%.2f"|format(total_value) }}</strong></p>
+</article>
+
+<article>
+    <header>Fund Allocation (must total 100%)</header>
+    <form method="post">
+        <p>New Total: <strong id="alloc-total">0%</strong></p>
+        <table>
+            <thead><tr><th>Fund</th><th>Current %</th><th>New %</th></tr></thead>
+            <tbody>
+            {% for f in funds %}
+            <tr>
+                <td>{{ f.name }} <small>(NAV: R${{ "%.4f"|format(f.current_nav) }})</small></td>
+                <td><strong>{{ current_allocs.get(f.id, 0) }}%</strong></td>
+                <td>
+                    <span id="val-{{ f.id }}">{{ current_allocs.get(f.id, 0)|int }}%</span>
+                    <input type="range" name="alloc_{{ f.id }}" class="alloc-slider" data-fund-id="{{ f.id }}"
+                           min="0" max="100" step="5" value="{{ current_allocs.get(f.id, 0)|int }}">
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        <button type="submit" id="alloc-submit" disabled>Submit Fund Switch</button>
+        <small>Fund switch will execute on the next time evolution. All current holdings will be sold and re-bought at new allocation.</small>
+    </form>
+</article>
+{% endblock %}

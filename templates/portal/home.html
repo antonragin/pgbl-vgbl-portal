@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Portal Home{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+<p>Simulation date: <strong>{{ sim_date }}</strong>{% if pending_count %} | <span class="badge badge-pending">{{ pending_count }} pending request(s)</span>{% endif %}</p>
+
+<div class="grid">
+    <article>
+        <header>Portfolio Summary</header>
+        <p>Total Value: <strong style="font-size:1.3em">R${{ "%.2f"|format(total_invested) }}</strong></p>
+        <p>Total Contributed: R${{ "%.2f"|format(total_contributed) }}</p>
+        <p>Gain/Loss: <span style="color:{{ '#4CAF50' if total_gain >= 0 else '#f44336' }}"><strong>R${{ "%.2f"|format(total_gain) }}</strong> ({{ "%+.2f"|format(overall_return_pct) }}%)</span></p>
+    </article>
+    <article>
+        <header>Brokerage Account</header>
+        <p style="font-size:1.5em"><strong>R${{ "%.2f"|format(brokerage_cash) }}</strong></p>
+        <a href="{{ url_for('portal.brokerage') }}">Manage &rarr;</a>
+    </article>
+    <article>
+        <header>Quick Actions</header>
+        <p><a href="{{ url_for('portal.new_certificate') }}" role="button" class="outline">New Certificate</a></p>
+        <p><a href="{{ url_for('portal.browse_plans') }}" role="button" class="outline secondary">Browse Plans</a></p>
+        <p><a href="{{ url_for('portal.transfers') }}" role="button" class="outline secondary">Transfers</a></p>
+        <p><a href="{{ url_for('portal.iof_declaration') }}" role="button" class="outline secondary">IOF Declaration</a></p>
+    </article>
+</div>
+
+<h2>Your Certificates</h2>
+{% for cd in cert_data %}
+{% set c = cd.cert %}
+<article>
+    <header>
+        <span class="badge badge-{{ c.plan_type|lower }}">{{ c.plan_type }}</span>
+        {{ c.plan_name }} &mdash; Certificate #{{ c.id }}
+        <span class="badge badge-{{ c.phase }}">{{ c.phase }}</span>
+    </header>
+    <div class="grid">
+        <div>
+            <p>Value: <strong>R${{ "%.2f"|format(cd.total_value) }}</strong></p>
+            <p>Contributed: R${{ "%.2f"|format(cd.total_contribs) }}</p>
+            <p>Gain/Loss: <span style="color:{{ '#4CAF50' if cd.gain >= 0 else '#f44336' }}">R${{ "%.2f"|format(cd.gain) }}</span></p>
+        </div>
+        <div>
+            {% if cd.holdings %}
+            {% for h in cd.holdings %}
+            <small>{{ h.fund_name }}: {{ "%.4f"|format(h.units) }} units (R${{ "%.2f"|format(h.market_value) }})</small><br>
+            {% endfor %}
+            {% endif %}
+        </div>
+    </div>
+    <footer>
+        <div class="actions">
+            <a href="{{ url_for('portal.certificate_detail', cert_id=c.id) }}" role="button" style="padding:0.3em 0.8em;font-size:0.85em">View Details</a>
+            <a href="{{ url_for('portal.contribute', cert_id=c.id) }}" role="button" class="outline" style="padding:0.3em 0.8em;font-size:0.85em">Contribute</a>
+            <a href="{{ url_for('portal.switch_funds', cert_id=c.id) }}" role="button" class="outline secondary" style="padding:0.3em 0.8em;font-size:0.85em">Switch Funds</a>
+            <a href="{{ url_for('portal.withdraw', cert_id=c.id) }}" role="button" class="outline contrast" style="padding:0.3em 0.8em;font-size:0.85em">Withdraw</a>
+        </div>
+    </footer>
+</article>
+{% else %}
+<p>No certificates yet. <a href="{{ url_for('portal.new_certificate') }}">Create one</a>.</p>
+{% endfor %}
+{% endblock %}

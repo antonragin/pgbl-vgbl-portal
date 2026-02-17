@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Requests - Admin{% endblock %}
+{% block nav_brand %}Admin Panel{% endblock %}
+
+{% block content %}
+<h1>Request Log</h1>
+<a href="{{ url_for('admin.dashboard') }}">&larr; Dashboard</a>
+
+<p>
+    Filter:
+    <a href="{{ url_for('admin.requests_log') }}" {{ 'aria-current="page"' if not current_filter }}>All</a> |
+    <a href="{{ url_for('admin.requests_log') }}?status=pending" {{ 'aria-current="page"' if current_filter == 'pending' }}>Pending</a> |
+    <a href="{{ url_for('admin.requests_log') }}?status=completed" {{ 'aria-current="page"' if current_filter == 'completed' }}>Completed</a> |
+    <a href="{{ url_for('admin.requests_log') }}?status=failed" {{ 'aria-current="page"' if current_filter == 'failed' }}>Failed</a> |
+    <a href="{{ url_for('admin.requests_log') }}?status=rejected" {{ 'aria-current="page"' if current_filter == 'rejected' }}>Rejected</a> |
+    <a href="{{ url_for('admin.requests_log') }}?status=cancelled" {{ 'aria-current="page"' if current_filter == 'cancelled' }}>Cancelled</a>
+</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>User</th>
+            <th>Certificate</th>
+            <th>Type</th>
+            <th>Status</th>
+            <th>Details</th>
+            <th>Created</th>
+            <th>Completed</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in requests %}
+        <tr>
+            <td>{{ r.id }}</td>
+            <td>{{ r.user_id }}</td>
+            <td>{{ r.certificate_id or '-' }}</td>
+            <td>{{ r.type }}</td>
+            <td>
+                <span class="badge badge-{{ r.status }}">{{ r.status }}</span>
+                {% if r.rejected_reason %}<br><small>{{ r.rejected_reason }}</small>{% endif %}
+            </td>
+            <td>{{ (r.details or '-')[:60] }}</td>
+            <td>{{ r.created_date }}</td>
+            <td>{{ r.completed_date or '-' }}</td>
+            <td>
+                {% if r.status == 'pending' %}
+                <form method="post" action="{{ url_for('admin.reject_request', req_id=r.id) }}" style="display:inline">
+                    <input type="text" name="reason" placeholder="Reason (optional)" style="width:120px; display:inline; margin:0; padding:2px 4px; font-size:0.8em">
+                    <button type="submit" class="outline secondary" style="padding:2px 8px; font-size:0.8em"
+                            onclick="return confirm('Reject request #{{ r.id }}?')">Reject</button>
+                </form>
+                {% else %}-{% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9">No requests found.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

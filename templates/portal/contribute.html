@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Contribute - Certificate #{{ cert.id }}{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>Contribute to Certificate #{{ cert.id }}</h1>
+<a href="{{ url_for('portal.certificate_detail', cert_id=cert.id) }}">&larr; Back to Certificate</a>
+
+<article>
+    <p><span class="badge badge-{{ cert.plan_type|lower }}">{{ cert.plan_type }}</span> {{ cert.plan_name }}</p>
+    <p>Available brokerage cash: <strong>R${{ "%.2f"|format(brokerage_cash) }}</strong></p>
+
+    {% if iof_warning %}
+    <article style="border-left: 4px solid #ff9800; padding-left: 1em;">
+        <strong>IOF Warning:</strong> {{ iof_warning }}
+        <br><small><a href="{{ url_for('portal.iof_declaration') }}">Update IOF declaration</a> for contributions at other issuers.</small>
+    </article>
+    {% endif %}
+
+    {% if cert.plan_type == 'VGBL' %}
+    <article style="border-left: 4px solid #42A5F5; padding-left: 1em;">
+        <strong>IOF Note:</strong> VGBL contributions exceeding R$600,000/year (across all issuers) are subject to 5% IOF (Decree 12.499/2025). The IOF is deducted from the contribution amount before investing.
+        <br><small><a href="{{ url_for('portal.iof_declaration') }}">Declare contributions at other issuers</a></small>
+    </article>
+    {% endif %}
+
+    {% if target_allocs %}
+    <p>Funds will be purchased according to your target allocation:</p>
+    <ul>
+    {% for ta in target_allocs %}
+    <li>{{ ta.fund_name }}: {{ "%.0f"|format(ta.pct) }}%</li>
+    {% endfor %}
+    </ul>
+    {% else %}
+    <p><strong>Warning:</strong> No target allocation set. <a href="{{ url_for('portal.switch_funds', cert_id=cert.id) }}">Set allocation first</a>.</p>
+    {% endif %}
+
+    <form method="post">
+        <label>
+            Contribution Amount (R$)
+            <input type="number" name="amount" step="0.01" min="0.01" max="{{ brokerage_cash }}" required placeholder="e.g. 5000.00">
+        </label>
+        <button type="submit">Submit Contribution</button>
+        <small>Contribution will be processed on the next time evolution. 100% of funds will be invested (no cash residual).</small>
+    </form>
+</article>
+{% endblock %}

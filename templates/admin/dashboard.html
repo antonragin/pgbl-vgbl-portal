@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Admin Dashboard{% endblock %}
+{% block nav_brand %}Admin Panel{% endblock %}
+
+{% block content %}
+<h1>Admin Dashboard</h1>
+<p>Simulation: <strong>Month {{ sim_month }}</strong> ({{ sim_date }})</p>
+
+<div class="grid">
+    <article>
+        <header>Users</header>
+        <p><strong>{{ user_count }}</strong> registered</p>
+        <a href="{{ url_for('admin.users') }}">Manage &rarr;</a>
+    </article>
+    <article>
+        <header>Plans</header>
+        <p><strong>{{ plan_count }}</strong> defined</p>
+        <a href="{{ url_for('admin.plans') }}">Manage &rarr;</a>
+    </article>
+    <article>
+        <header>Funds</header>
+        <p><strong>{{ fund_count }}</strong> available</p>
+        <a href="{{ url_for('admin.funds') }}">Manage &rarr;</a>
+    </article>
+</div>
+<div class="grid">
+    <article>
+        <header>Certificates</header>
+        <p><strong>{{ cert_count }}</strong> active</p>
+    </article>
+    <article>
+        <header>Pending Requests</header>
+        <p><strong>{{ pending_count }}</strong> awaiting processing</p>
+        <a href="{{ url_for('admin.requests_log') }}?status=pending">View &rarr;</a>
+    </article>
+    <article>
+        <header>Time Control</header>
+        <p>Current: Month {{ sim_month }} ({{ sim_date }})</p>
+        <form method="post" action="{{ url_for('admin.evolve_time') }}">
+            <fieldset role="group">
+                <input type="number" name="steps" value="1" min="1" max="120" style="width:80px">
+                <button type="submit">Evolve Time</button>
+            </fieldset>
+        </form>
+    </article>
+</div>
+{% endblock %}

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Edit Plan - Admin{% endblock %}
+{% block nav_brand %}Admin Panel{% endblock %}
+
+{% block content %}
+<h1>Edit Plan #{{ plan.id }}</h1>
+<a href="{{ url_for('admin.plans') }}">&larr; Plans</a>
+
+<article>
+    <form method="post">
+        <div class="grid">
+            <label>
+                Type
+                <select name="type" required>
+                    <option value="PGBL" {{ 'selected' if plan.type == 'PGBL' }}>PGBL</option>
+                    <option value="VGBL" {{ 'selected' if plan.type == 'VGBL' }}>VGBL</option>
+                </select>
+            </label>
+            <label>
+                Name
+                <input type="text" name="name" required value="{{ plan.name }}">
+            </label>
+            <label>
+                Plan Code
+                <input type="text" name="plan_code" value="{{ plan.plan_code or '' }}" placeholder="Official SUSEP code">
+            </label>
+        </div>
+        <label>
+            Fees & Information
+            <textarea name="fees_info" placeholder="Admin fee: 1.5% p.a., Loading: 0%">{{ plan.fees_info or '' }}</textarea>
+        </label>
+        <button type="submit">Save Changes</button>
+    </form>
+</article>
+{% endblock %}

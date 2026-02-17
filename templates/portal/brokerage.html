@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Brokerage Account{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>Brokerage Account</h1>
+<a href="{{ url_for('portal.home') }}">&larr; Dashboard</a>
+
+<article>
+    <header>Cash Balance</header>
+    <p style="font-size:2em"><strong>R${{ "%.2f"|format(cash) }}</strong></p>
+    <p>This is cash available for contributions to your certificates, or for withdrawal.</p>
+</article>
+
+<article>
+    <header>Withdraw from Brokerage</header>
+    <form method="post">
+        <label>
+            Amount (R$)
+            <input type="number" name="amount" step="0.01" min="0.01" max="{{ cash }}" required placeholder="Amount to withdraw">
+        </label>
+        <button type="submit" onclick="return confirmAction('Confirm brokerage withdrawal?')">Withdraw</button>
+        <small>Cash will be removed from the simulation.</small>
+    </form>
+</article>
+
+{% if requests %}
+<h2>Withdrawal History</h2>
+<table>
+    <thead><tr><th>ID</th><th>Status</th><th>Details</th><th>Created</th><th>Completed</th></tr></thead>
+    <tbody>
+    {% for r in requests %}
+    <tr>
+        <td>{{ r.id }}</td>
+        <td><span class="badge badge-{{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.details }}</td>
+        <td>{{ r.created_date }}</td>
+        <td>{{ r.completed_date or '-' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,7 @@
+<li><a href="{{ url_for('portal.home') }}">Dashboard</a></li>
+<li><a href="{{ url_for('portal.browse_plans') }}">Plans & Funds</a></li>
+<li><a href="{{ url_for('portal.transfers') }}">Transfers</a></li>
+<li><a href="{{ url_for('portal.brokerage') }}">Brokerage</a></li>
+<li><a href="{{ url_for('portal.request_log') }}">Requests</a></li>
+<li><a href="{{ url_for('portal.account') }}" class="disabled">My Account</a></li>
+<li><a href="{{ url_for('portal.logout') }}">Logout ({{ session.username }})</a></li>

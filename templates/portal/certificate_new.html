@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}New Certificate{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>Create New Certificate</h1>
+<a href="{{ url_for('portal.home') }}">&larr; Dashboard</a>
+
+<form method="post">
+    <article>
+        <header>1. Select Plan</header>
+        <select name="plan_id" required>
+            {% for p in plans %}
+            <option value="{{ p.id }}">{{ p.type }} - {{ p.name }} ({{ p.plan_code or 'N/A' }})</option>
+            {% endfor %}
+        </select>
+    </article>
+
+    <article>
+        <header>2. Set Fund Allocation (must total 100%)</header>
+        <p>Total: <strong id="alloc-total">0%</strong></p>
+        {% for f in funds %}
+        <label>
+            {{ f.name }} (NAV: R${{ "%.4f"|format(f.current_nav) }}) &mdash; <span id="val-{{ f.id }}">0%</span>
+            <input type="range" name="alloc_{{ f.id }}" class="alloc-slider" data-fund-id="{{ f.id }}"
+                   min="0" max="100" step="5" value="0">
+        </label>
+        {% endfor %}
+    </article>
+
+    <button type="submit" id="alloc-submit" disabled>Create Certificate</button>
+</form>
+{% endblock %}

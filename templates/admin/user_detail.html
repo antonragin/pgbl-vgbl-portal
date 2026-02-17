@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}User: {{ user.username }} - Admin{% endblock %}
+{% block nav_brand %}Admin Panel{% endblock %}
+
+{% block content %}
+<h1>User: {{ user.username }}</h1>
+<a href="{{ url_for('admin.users') }}">&larr; All Users</a>
+<p>Type: {{ 'Retail' if user.is_retail else 'Qualified' }} | Created: {{ user.created_at }}</p>
+
+<h2>Brokerage Account</h2>
+<p>Cash balance: <strong>R${{ "%.2f"|format(brokerage_cash) }}</strong></p>
+<form method="post" action="{{ url_for('admin.inject_cash', user_id=user.id) }}">
+    <fieldset role="group">
+        <input type="number" name="amount" step="0.01" min="0.01" placeholder="Amount to inject" required>
+        <button type="submit">Inject Cash</button>
+    </fieldset>
+</form>
+
+<h2>Certificates</h2>
+<article>
+    <header>Add Certificate</header>
+    <form method="post" action="{{ url_for('admin.add_certificate', user_id=user.id) }}">
+        <div class="grid">
+            <label>
+                Plan
+                <select name="plan_id" required>
+                    {% for p in plans %}
+                    <option value="{{ p.id }}">{{ p.type }} - {{ p.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>
+                Created Date
+                <input type="date" name="created_date" value="{{ sim_date }}">
+            </label>
+            <label>
+                &nbsp;
+                <button type="submit">Create Certificate</button>
+            </label>
+        </div>
+    </form>
+</article>
+
+{% for cd in cert_data %}
+{% set c = cd.cert %}
+<article>
+    <header>
+        <span class="badge badge-{{ c.plan_type|lower }}">{{ c.plan_type }}</span>
+        {{ c.plan_name }} (Certificate #{{ c.id }})
+        &mdash; <span class="badge badge-{{ c.phase }}">{{ c.phase }}</span>
+        {% if c.tax_regime %}
+        | Regime: <strong>{{ c.tax_regime }}</strong>
+        {% else %}
+        | Regime: <em>not chosen</em>
+        {% endif %}
+    </header>
+    <p>Created: {{ c.created_date }} | Total Value: <strong>R${{ "%.2f"|format(cd.total_value) }}</strong>
+       | Cash: R${{ "%.2f"|format(c.cash_balance) }}</p>
+    {% if cd.holdings %}
+    <table>
+        <thead><tr><th>Fund</th><th>Units</th><th>NAV</th><th>Value</th></tr></thead>
+        <tbody>
+        {% for h in cd.holdings %}
+        <tr>
+            <td>{{ h.fund_name }}</td>
+            <td>{{ h.units }}</td>
+            <td>R${{ "%.4f"|format(h.current_nav) }}</td>
+            <td>R${{ "%.2f"|format(h.market_value) }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    <div class="actions">
+        <a href="{{ url_for('admin.edit_certificate', user_id=user.id, cert_id=c.id) }}" role="button" class="outline" style="padding:0.3em 0.8em;font-size:0.85em">Edit</a>
+        <form method="post" action="{{ url_for('admin.delete_certificate', user_id=user.id, cert_id=c.id) }}">
+            <button type="submit" class="secondary outline" style="padding:0.3em 0.8em;font-size:0.85em"
+                    onclick="return confirmAction('Delete certificate #{{ c.id }}?')">Delete</button>
+        </form>
+    </div>
+</article>
+{% else %}
+<p>No certificates yet.</p>
+{% endfor %}
+
+<h2>Request Log</h2>
+{% if requests %}
+<table>
+    <thead><tr><th>ID</th><th>Type</th><th>Cert</th><th>Status</th><th>Created</th><th>Completed</th></tr></thead>
+    <tbody>
+    {% for r in requests %}
+    <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.type }}</td>
+        <td>{{ r.certificate_id or '-' }}</td>
+        <td><span class="badge badge-{{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.created_date }}</td>
+        <td>{{ r.completed_date or '-' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No requests.</p>
+{% endif %}
+{% endblock %}

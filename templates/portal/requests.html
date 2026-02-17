@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}My Requests{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>My Requests</h1>
+<a href="{{ url_for('portal.home') }}">&larr; Dashboard</a>
+
+<table>
+    <thead>
+        <tr><th>ID</th><th>Type</th><th>Certificate</th><th>Status</th><th>Created</th><th>Completed</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+    {% for r in requests %}
+    <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.type }}</td>
+        <td>{% if r.certificate_id %}<a href="{{ url_for('portal.certificate_detail', cert_id=r.certificate_id) }}">#{{ r.certificate_id }}</a>{% else %}-{% endif %}</td>
+        <td>
+            <span class="badge badge-{{ r.status }}">{{ r.status }}</span>
+            {% if r.rejected_reason %}<br><small>Reason: {{ r.rejected_reason }}</small>{% endif %}
+        </td>
+        <td>{{ r.created_date }}</td>
+        <td>{{ r.completed_date or '-' }}</td>
+        <td>
+            {% if r.status == 'pending' %}
+            <form method="post" action="{{ url_for('portal.cancel_request', req_id=r.id) }}" style="display:inline">
+                <button type="submit" class="outline secondary" style="padding:2px 8px; font-size:0.8em"
+                        onclick="return confirm('Cancel request #{{ r.id }}?')">Cancel</button>
+            </form>
+            {% else %}-{% endif %}
+        </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">No requests yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

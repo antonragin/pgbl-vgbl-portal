@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Edit Fund - Admin{% endblock %}
+{% block nav_brand %}Admin Panel{% endblock %}
+
+{% block content %}
+<h1>Edit Fund #{{ fund.id }}</h1>
+<a href="{{ url_for('admin.funds') }}">&larr; Funds</a>
+
+<article>
+    <form method="post" enctype="multipart/form-data">
+        <div class="grid">
+            <label>
+                Name
+                <input type="text" name="name" required value="{{ fund.name }}">
+            </label>
+            <label>
+                CNPJ
+                <input type="text" name="cnpj" value="{{ fund.cnpj or '' }}" placeholder="XX.XXX.XXX/XXXX-XX">
+            </label>
+            <label>
+                Investor Type
+                <select name="is_qualified_only">
+                    <option value="0" {{ 'selected' if not fund.is_qualified_only }}>Retail</option>
+                    <option value="1" {{ 'selected' if fund.is_qualified_only }}>Qualified Only</option>
+                </select>
+            </label>
+        </div>
+        <label>
+            Description
+            <textarea name="description">{{ fund.description or '' }}</textarea>
+        </label>
+        <label>
+            Replace Returns CSV (month, return) &mdash; leave blank to keep current series
+            <input type="file" name="returns_csv" accept=".csv">
+        </label>
+        <small>Current NAV: R${{ "%.4f"|format(fund.current_nav) }} | Initial NAV: R${{ "%.4f"|format(fund.initial_nav) }} | Return series: {{ returns|length }} months{% if fund.returns_csv %} ({{ fund.returns_csv }}){% endif %}</small>
+        <button type="submit">Save Changes</button>
+    </form>
+</article>
+
+{% if returns %}
+<article>
+    <header>Current Return Series ({{ returns|length }} months)</header>
+    <table>
+        <thead><tr><th>Month</th><th>Return %</th></tr></thead>
+        <tbody>
+        {% for r in returns %}
+        <tr><td>{{ r.month_idx }}</td><td>{{ "%.4f"|format(r.return_pct * 100) }}%</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</article>
+{% endif %}
+{% endblock %}

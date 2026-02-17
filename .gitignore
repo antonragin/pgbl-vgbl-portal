@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+data/portal.db
+*.egg-info/
+.env
+all_code*.txt

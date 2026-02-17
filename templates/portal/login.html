@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Login{% endblock %}
+
+{% block content %}
+<article style="max-width: 400px; margin: 2em auto;">
+    <header>Investor Portal Login</header>
+    <form method="post" action="{{ url_for('portal.login') }}">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" required placeholder="Enter username">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required placeholder="Enter password">
+        <button type="submit">Login</button>
+    </form>
+</article>
+{% endblock %}

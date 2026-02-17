@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Edit User - Admin{% endblock %}
+{% block nav_brand %}Admin Panel{% endblock %}
+
+{% block content %}
+<h1>Edit User #{{ user.id }}</h1>
+<a href="{{ url_for('admin.users') }}">&larr; Users</a>
+
+<article>
+    <form method="post">
+        <div class="grid">
+            <label>
+                Username (or email)
+                <input type="text" name="username" required value="{{ user.username }}">
+            </label>
+            <label>
+                Investor Type
+                <select name="is_retail">
+                    <option value="1" {{ 'selected' if user.is_retail }}>Retail</option>
+                    <option value="0" {{ 'selected' if not user.is_retail }}>Qualified</option>
+                </select>
+            </label>
+            <label>
+                &nbsp;
+                <button type="submit">Save Changes</button>
+            </label>
+        </div>
+    </form>
+</article>
+{% endblock %}

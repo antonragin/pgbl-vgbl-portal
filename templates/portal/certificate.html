@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block title %}Certificate #{{ cert.id }}{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>Certificate #{{ cert.id }}</h1>
+<a href="{{ url_for('portal.home') }}">&larr; Dashboard</a>
+
+<article>
+    <header>
+        <span class="badge badge-{{ cert.plan_type|lower }}">{{ cert.plan_type }}</span>
+        {{ cert.plan_name }}
+        &mdash; <span class="badge badge-{{ cert.phase }}">{{ cert.phase }}</span>
+        {% if cert.tax_regime %}
+        | Regime: <strong>{{ cert.tax_regime }}</strong>
+        {% else %}
+        | Regime: <em>not yet chosen (chosen before first withdrawal)</em>
+        {% endif %}
+    </header>
+    <div class="grid">
+        <div>
+            <p>Total Value: <strong style="font-size:1.3em">R${{ "%.2f"|format(total_value) }}</strong></p>
+            <p>Total Contributed: R${{ "%.2f"|format(total_contribs) }}</p>
+            <p>Cost Basis (Remaining): R${{ "%.2f"|format(total_remaining) }}</p>
+            <p>Gain/Loss: <span style="color:{{ '#4CAF50' if gain >= 0 else '#f44336' }}">R${{ "%.2f"|format(gain) }} ({{ "%.1f"|format(gain/total_contribs*100 if total_contribs > 0 else 0) }}%)</span></p>
+            <p>Created: {{ cert.created_date }}</p>
+        </div>
+        <div>
+            <div class="actions">
+                <a href="{{ url_for('portal.contribute', cert_id=cert.id) }}" role="button">Contribute</a>
+                <a href="{{ url_for('portal.switch_funds', cert_id=cert.id) }}" role="button" class="outline">Switch Funds</a>
+                <a href="{{ url_for('portal.withdraw', cert_id=cert.id) }}" role="button" class="contrast">Withdraw</a>
+                <a href="{{ url_for('portal.transfers') }}" role="button" class="outline secondary">Transfers</a>
+            </div>
+        </div>
+    </div>
+
+    {% if cert.tax_regime %}
+    <details>
+        <summary>Tax Regime Details: {{ cert.tax_regime|title }}</summary>
+        {% if cert.tax_regime == 'regressive' %}
+        <p>Under the <strong>regressive regime</strong> (Lei 11.053), tax rates decrease with the holding period of each contribution (FIFO):</p>
+        <table style="font-size:0.85em">
+            <thead><tr><th>Period</th><th>Rate</th></tr></thead>
+            <tbody>
+                <tr><td>Up to 2 years</td><td>35%</td></tr>
+                <tr><td>2-4 years</td><td>30%</td></tr>
+                <tr><td>4-6 years</td><td>25%</td></tr>
+                <tr><td>6-8 years</td><td>20%</td></tr>
+                <tr><td>8-10 years</td><td>15%</td></tr>
+                <tr><td>Over 10 years</td><td>10%</td></tr>
+            </tbody>
+        </table>
+        <p><small>Tax is final (withheld at source). {% if plan_type == 'PGBL' %}For PGBL, tax applies to the <strong>total</strong> withdrawal amount.{% else %}For VGBL, tax applies only to the <strong>earnings portion</strong>.{% endif %}</small></p>
+        {% elif cert.tax_regime == 'progressive' %}
+        <p>Under the <strong>progressive regime</strong>, withdrawals are taxed using standard IRPF monthly brackets:</p>
+        <table style="font-size:0.85em">
+            <thead><tr><th>Monthly Income</th><th>Rate</th></tr></thead>
+            <tbody>
+                <tr><td>Up to R$2,259.20</td><td>Exempt</td></tr>
+                <tr><td>R$2,259.21 - R$2,826.65</td><td>7.5%</td></tr>
+                <tr><td>R$2,826.66 - R$3,751.05</td><td>15%</td></tr>
+                <tr><td>R$3,751.06 - R$4,664.68</td><td>22.5%</td></tr>
+                <tr><td>Over R$4,664.68</td><td>27.5%</td></tr>
+            </tbody>
+        </table>
+        <p><small>15% is withheld at source. Final tax is adjusted in the annual income return (estimated). {% if plan_type == 'PGBL' %}For PGBL, tax applies to the <strong>total</strong> withdrawal.{% else %}For VGBL, tax applies only to <strong>earnings</strong>.{% endif %}</small></p>
+        {% endif %}
+    </details>
+    {% endif %}
+</article>
+
+<h2>Holdings</h2>
+{% if holdings %}
+<table>
+    <thead><tr><th>Fund</th><th>Units</th><th>NAV</th><th>Value</th><th>Allocation</th></tr></thead>
+    <tbody>
+    {% for h in holdings %}
+    <tr>
+        <td><a href="{{ url_for('portal.fund_detail', fund_id=h.fund_id) }}">{{ h.fund_name }}</a></td>
+        <td>{{ "%.6f"|format(h.units) }}</td>
+        <td>R${{ "%.4f"|format(h.current_nav) }}</td>
+        <td>R${{ "%.2f"|format(h.market_value) }}</td>
+        <td>{{ "%.1f"|format(h.market_value / total_value * 100 if total_value > 0 else 0) }}%</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No holdings. <a href="{{ url_for('portal.contribute', cert_id=cert.id) }}">Make a contribution</a> to start investing.</p>
+{% endif %}
+
+{% if target_allocs %}
+<h3>Target Allocation</h3>
+<table>
+    <thead><tr><th>Fund</th><th>Target %</th></tr></thead>
+    <tbody>
+    {% for ta in target_allocs %}
+    <tr><td>{{ ta.fund_name }}</td><td>{{ "%.0f"|format(ta.pct) }}%</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+<h2>Tax Lots (Contribution History)</h2>
+<p><a href="{{ url_for('portal.tax_lots', cert_id=cert.id) }}">View detailed Tax Lots page &rarr;</a></p>
+{% if contrib_aging %}
+<table>
+    <thead><tr><th>Date</th><th>Original</th><th>Remaining</th><th>Source</th><th>Age (months)</th><th>Regressive Rate</th><th>Next Drop</th>{% if plan_type == 'VGBL' %}<th>Earnings</th>{% endif %}</tr></thead>
+    <tbody>
+    {% for ca in contrib_aging %}
+    {% set c = ca.contribution %}
+    <tr{% if c.remaining_amount <= 0 %} style="opacity:0.4"{% endif %}>
+        <td>{{ c.contribution_date }}</td>
+        <td>R${{ "%.2f"|format(c.amount) }}</td>
+        <td>R${{ "%.2f"|format(c.remaining_amount) }}</td>
+        <td>
+            {% if c.source_type == 'transfer_internal' %}
+                <span style="color: #42A5F5">Transfer (internal)</span>
+            {% elif c.source_type == 'transfer_external' %}
+                <span style="color: #ff9800">Transfer (external)</span>
+            {% else %}
+                Regular
+            {% endif %}
+        </td>
+        <td>{{ ca.months_held }}</td>
+        <td>{{ "%.0f"|format(ca.current_rate * 100) }}%</td>
+        <td>
+            {% if ca.next_bracket %}
+                {{ "%.0f"|format(ca.next_bracket.rate * 100) }}% in {{ ca.next_bracket.months_until }} month(s)
+            {% else %}
+                <span style="color:#4CAF50">Minimum rate</span>
+            {% endif %}
+        </td>
+        {% if plan_type == 'VGBL' %}
+        <td>R${{ "%.2f"|format(ca.lot_earnings) }}</td>
+        {% endif %}
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No contributions yet.</p>
+{% endif %}
+
+{% if withdrawals %}
+<h2>Withdrawal History</h2>
+<table>
+    <thead><tr><th>Date</th><th>Gross</th><th>Tax</th><th>Net</th></tr></thead>
+    <tbody>
+    {% for w in withdrawals %}
+    <tr>
+        <td>{{ w.withdrawal_date }}</td>
+        <td>R${{ "%.2f"|format(w.gross_amount) }}</td>
+        <td>R${{ "%.2f"|format(w.tax_withheld) }}</td>
+        <td>R${{ "%.2f"|format(w.net_amount) }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+{% if requests %}
+<h2>Requests</h2>
+<table>
+    <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Created</th><th>Completed</th></tr></thead>
+    <tbody>
+    {% for r in requests %}
+    <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.type }}</td>
+        <td><span class="badge badge-{{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.created_date }}</td>
+        <td>{{ r.completed_date or '-' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

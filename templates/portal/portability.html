@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Portability - Certificate #{{ cert.id }}{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>Portability - Certificate #{{ cert.id }}</h1>
+<a href="{{ url_for('portal.certificate_detail', cert_id=cert.id) }}">&larr; Back to Certificate</a>
+
+<article>
+    <p><span class="badge badge-{{ cert.plan_type|lower }}">{{ cert.plan_type }}</span> {{ cert.plan_name }}</p>
+    <p>Total Value: <strong>R${{ "%.2f"|format(total_value) }}</strong></p>
+
+    <article style="border-left: 4px solid #42A5F5; padding-left: 1em;">
+        <strong>Portability Rules:</strong>
+        <ul>
+            <li>Only {{ cert.plan_type }} &rarr; {{ cert.plan_type }} is allowed (same product type)</li>
+            <li>Portability is NOT a taxable event</li>
+            <li>Contribution history (tax clock) is preserved at the destination</li>
+        </ul>
+    </article>
+
+    {% if eligible %}
+    <form method="post">
+        <label>
+            Destination Certificate
+            <select name="destination_cert_id" required>
+                {% for c in eligible %}
+                <option value="{{ c.id }}">Certificate #{{ c.id }} - {{ c.plan_type }} {{ c.plan_name }} ({{ c.phase }})</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Amount (R$)
+            <input type="number" name="amount" step="0.01" min="0.01" max="{{ total_value }}" required placeholder="Amount to port">
+        </label>
+        <button type="submit" onclick="return confirmAction('Confirm portability transfer?')">Submit Portability</button>
+        <small>Portability will be processed on the next time evolution.</small>
+    </form>
+    {% else %}
+    <p>No eligible destination certificates found. You need another {{ cert.plan_type }} certificate to port to. <a href="{{ url_for('portal.new_certificate') }}">Create one first</a>.</p>
+    {% endif %}
+</article>
+
+<article>
+    <header>External Portability (to/from another institution)</header>
+    <p style="opacity:0.5"><em>External portability is not available in this prototype. In production, the user would be able to port balances to/from other institutions via SUSEP-regulated process.</em></p>
+    <button disabled>Request External Port-In</button>
+    <button disabled>Request External Port-Out</button>
+</article>
+{% endblock %}

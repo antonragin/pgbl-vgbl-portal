@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Plans - Admin{% endblock %}
+{% block nav_brand %}Admin Panel{% endblock %}
+
+{% block content %}
+<h1>Plans</h1>
+<a href="{{ url_for('admin.dashboard') }}">&larr; Dashboard</a>
+
+<article>
+    <header>Add Plan</header>
+    <form method="post">
+        <div class="grid">
+            <label>
+                Type
+                <select name="type" required>
+                    <option value="PGBL">PGBL</option>
+                    <option value="VGBL">VGBL</option>
+                </select>
+            </label>
+            <label>
+                Name
+                <input type="text" name="name" required placeholder="e.g. PGBL Renda Fixa Plus">
+            </label>
+            <label>
+                Plan Code
+                <input type="text" name="plan_code" placeholder="Official SUSEP code">
+            </label>
+        </div>
+        <label>
+            Fees & Information
+            <textarea name="fees_info" placeholder="Admin fee: 1.5% p.a., Loading: 0%"></textarea>
+        </label>
+        <button type="submit">Create Plan</button>
+    </form>
+</article>
+
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Type</th>
+            <th>Name</th>
+            <th>Code</th>
+            <th>Fees</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for p in plans %}
+        <tr>
+            <td>{{ p.id }}</td>
+            <td><span class="badge badge-{{ p.type|lower }}">{{ p.type }}</span></td>
+            <td>{{ p.name }}</td>
+            <td>{{ p.plan_code or '-' }}</td>
+            <td>{{ (p.fees_info or '-')[:50] }}</td>
+            <td>
+                <a href="{{ url_for('admin.edit_plan', plan_id=p.id) }}" style="font-size:0.8em">Edit</a>
+                <form method="post" action="{{ url_for('admin.delete_plan', plan_id=p.id) }}" style="margin:0;display:inline">
+                    <button type="submit" class="secondary outline" style="padding:0.2em 0.5em;font-size:0.8em"
+                            onclick="return confirmAction('Delete plan {{ p.name }}?')">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6">No plans yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

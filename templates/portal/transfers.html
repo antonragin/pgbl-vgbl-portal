@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block title %}Transfers{% endblock %}
+{% block nav_brand %}Investor Portal{% endblock %}
+{% block nav_links %}
+{% include "portal/_nav.html" %}
+{% endblock %}
+
+{% block content %}
+<h1>Transfers & Portability</h1>
+<a href="{{ url_for('portal.home') }}">&larr; Dashboard</a>
+
+<article style="border-left: 4px solid #42A5F5; padding-left: 1em;">
+    <strong>Transfer Rules:</strong>
+    <ul>
+        <li>Only same-type transfers allowed: PGBL &rarr; PGBL or VGBL &rarr; VGBL</li>
+        <li>Transfers are <strong>not</strong> taxable events</li>
+        <li>Internal transfers: contribution history (tax lots) is preserved with original dates</li>
+        <li>Tax regime compatibility: if the source certificate has a locked regime, the destination must match or will inherit it</li>
+        <li>External transfers in: lots are backdated according to the port-in schedule (see below)</li>
+    </ul>
+</article>
+
+{# --- Internal Transfer --- #}
+<article>
+    <header>Internal Transfer (between your certificates)</header>
+    {% if certs|length >= 2 %}
+    <form method="post">
+        <input type="hidden" name="action" value="internal">
+        <div class="grid">
+            <label>
+                Source Certificate
+                <select name="source_cert_id" required>
+                    <option value="">-- Select source --</option>
+                    {% for c in certs %}
+                    <option value="{{ c.id }}">
+                        #{{ c.id }} - {{ c.plan_type }} {{ c.plan_name }}
+                        ({{ c.phase }}{% if c.tax_regime %}, {{ c.tax_regime }}{% endif %}) - R${{ "%.2f"|format(cert_values[c.id]) }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>
+                Destination Certificate
+                <select name="dest_cert_id" required>
+                    <option value="">-- Select destination --</option>
+                    {% for c in certs %}
+                    <option value="{{ c.id }}">
+                        #{{ c.id }} - {{ c.plan_type }} {{ c.plan_name }}
+                        ({{ c.phase }}{% if c.tax_regime %}, {{ c.tax_regime }}{% endif %})
+                    </option>
+                    {% endfor %}
+                </select>
+            </label>
+        </div>
+        <label>
+            Amount (R$)
+            <input type="number" name="amount" step="0.01" min="0.01" required placeholder="Amount to transfer">
+        </label>
+        <small>Source and destination must be the same type (PGBL&rarr;PGBL or VGBL&rarr;VGBL). Tax regime must be compatible: if source has a locked regime, destination must match or have no regime yet. Contribution history (tax lots) will be preserved with original dates.</small>
+        <button type="submit" onclick="return confirmAction('Confirm internal transfer?')">Submit Internal Transfer</button>
+    </form>
+    {% else %}
+    <p>You need at least two certificates to perform an internal transfer. <a href="{{ url_for('portal.new_certificate') }}">Create another certificate</a>.</p>
+    {% endif %}
+</article>
+
+{# --- External Transfer Out --- #}
+<article>
+    <header>External Transfer Out (to another institution)</header>
+    {% if certs %}
+    <form method="post">
+        <input type="hidden" name="action" value="external_out">
+        <label>
+            Source Certificate
+            <select name="source_cert_id" required>
+                <option value="">-- Select source --</option>
+                {% for c in certs %}
+                <option value="{{ c.id }}">
+                    #{{ c.id }} - {{ c.plan_type }} {{ c.plan_name }}
+                    ({{ c.phase }}) - R${{ "%.2f"|format(cert_values[c.id]) }}
+                </option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Destination Institution
+            <input type="text" name="dest_institution" required placeholder="Name of the receiving institution">
+        </label>
+        <label>
+            Amount (R$)
+            <input type="number" name="amount" step="0.01" min="0.01" required placeholder="Amount to transfer out">
+        </label>
+        <small>Funds will leave this simulation. Tax lots are consumed FIFO and recorded for audit. In production, this would initiate a SUSEP-regulated port-out process.</small>
+        <button type="submit" onclick="return confirmAction('Confirm external transfer out?')">Submit External Transfer Out</button>
+    </form>
+    {% else %}
+    <p>No certificates available.</p>
+    {% endif %}
+</article>
+
+{# --- External Transfer In --- #}
+<article>
+    <header>External Transfer In (from another institution)</header>
+    <article style="border-left: 4px solid #ff9800; padding-left: 1em; margin-bottom: 1em;">
+        <strong>Important:</strong> External transfers in create backdated tax lots according to the port-in schedule below, simulating the aging of contributions at the source institution.
+        {% if portin_schedule %}
+        <br><strong>Port-in schedule:</strong>
+        <ul style="margin-top: 0.3em; margin-bottom: 0;">
+            {% for s in portin_schedule %}
+            <li>{{ s.pct }}% dated {{ s.years_ago }} year(s) ago</li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </article>
+    {% if certs %}
+    <form method="post">
+        <input type="hidden" name="action" value="external_in">
+        <label>
+            Destination Certificate
+            <select name="dest_cert_id" required>
+                <option value="">-- Select destination --</option>
+                {% for c in certs %}
+                <option value="{{ c.id }}">
+                    #{{ c.id }} - {{ c.plan_type }} {{ c.plan_name }}
+                    ({{ c.phase }})
+                </option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Source Institution
+            <input type="text" name="source_institution" required placeholder="Name of the sending institution">
+        </label>
+        <label>
+            Amount (R$)
+            <input type="number" name="amount" step="0.01" min="0.01" required placeholder="Amount being transferred in">
+        </label>
+        <small>Funds will materialize in the simulation. Contribution lots will be backdated per the port-in schedule above.</small>
+        <button type="submit" onclick="return confirmAction('Confirm external transfer in?')">Submit External Transfer In</button>
+    </form>
+    {% else %}
+    <p>No certificates available.</p>
+    {% endif %}
+</article>
+
+{# --- Transfer History --- #}
+{% if transfer_requests %}
+<h2>Transfer History</h2>
+<table>
+    <thead>
+        <tr><th>ID</th><th>Type</th><th>Certificate</th><th>Status</th><th>Details</th><th>Created</th><th>Completed</th></tr>
+    </thead>
+    <tbody>
+    {% for r in transfer_requests %}
+    <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.type }}</td>
+        <td>{% if r.certificate_id %}<a href="{{ url_for('portal.certificate_detail', cert_id=r.certificate_id) }}">#{{ r.certificate_id }}</a>{% else %}-{% endif %}</td>
+        <td>
+            <span class="badge badge-{{ r.status }}">{{ r.status }}</span>
+            {% if r.rejected_reason %}<br><small>{{ r.rejected_reason }}</small>{% endif %}
+        </td>
+        <td>{{ (r.details or '-')[:80] }}</td>
+        <td>{{ r.created_date }}</td>
+        <td>{{ r.completed_date or '-' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}
