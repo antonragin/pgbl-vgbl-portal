@@ -54,8 +54,7 @@
         | Regime: <em>not chosen</em>
         {% endif %}
     </header>
-    <p>Created: {{ c.created_date }} | Total Value: <strong>R${{ "%.2f"|format(cd.total_value) }}</strong>
-       | Cash: R${{ "%.2f"|format(c.cash_balance) }}</p>
+    <p>Created: {{ c.created_date }} | Total Value: <strong>R${{ "%.2f"|format(cd.total_value) }}</strong></p>
     {% if cd.holdings %}
     <table>
         <thead><tr><th>Fund</th><th>Units</th><th>NAV</th><th>Value</th></tr></thead>
