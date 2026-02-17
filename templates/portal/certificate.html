@@ -114,7 +114,7 @@
 <p><a href="{{ url_for('portal.tax_lots', cert_id=cert.id) }}">View detailed Tax Lots page &rarr;</a></p>
 {% if contrib_aging %}
 <table>
-    <thead><tr><th>Date</th><th>Original</th><th>Units</th><th>Current Value</th><th>Source</th><th>Age</th><th>Regressive Rate</th><th>Next Drop</th>{% if plan_type == 'VGBL' %}<th>Earnings</th>{% endif %}</tr></thead>
+    <thead><tr><th>Date</th><th>{% if plan_type == 'VGBL' %}Original<br><small style="opacity:0.6">(FIFO)</small>{% else %}Original{% endif %}</th><th>Units</th><th>Current Value</th><th>Source</th><th>Age</th><th>Regressive Rate</th><th>Next Drop</th>{% if plan_type == 'VGBL' %}<th>Earnings<br><small style="opacity:0.6">(pro-rata)</small></th>{% endif %}</tr></thead>
     <tbody>
     {% for ca in contrib_aging %}
     {% set c = ca.contribution %}

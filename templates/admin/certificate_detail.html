@@ -24,6 +24,11 @@
     {% if cert.plan_type == 'VGBL' %} |
     P<sub>rem</sub>: <strong>R${{ "%.2f"|format(P_rem) }}</strong>
     {% endif %}
+    |
+    <form method="post" style="display:inline">
+        <input type="hidden" name="action" value="reconcile_units">
+        <button type="submit" class="outline secondary" style="padding:0.2em 0.6em;font-size:0.8em">Reconcile Units</button>
+    </form>
 </p>
 
 <h2>Holdings</h2>

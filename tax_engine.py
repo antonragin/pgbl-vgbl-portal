@@ -11,21 +11,21 @@ Certificate units approach:
 - unit_price = total_value / unit_supply
 - Per-lot value = lot.units_remaining * unit_price (captures actual growth per lot)
 - VGBL earnings_ratio = 1 - (premium_remaining / total_value)
-- Regressive brackets use exact days, not months
+- Regressive brackets use calendar-year deltas via dateutil.relativedelta
 """
 
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
 import models
 
-# Regressive tax brackets: (max_days, rate)
-# Legal boundaries: 2, 4, 6, 8, 10 years
-REGRESSIVE_BRACKETS = [
-    (730, 0.35),            # <= 2 years (365*2)
-    (1461, 0.30),           # 2-4 years (365*4 + 1 leap)
-    (2192, 0.25),           # 4-6 years (365*6 + 2 leap)
-    (2922, 0.20),           # 6-8 years (365*8 + 2 leap)
-    (3653, 0.15),           # 8-10 years (365*10 + 3 leap)
-    (float('inf'), 0.10),   # > 10 years
+# Regressive tax brackets: (years, rate)
+# Legal boundaries: 2, 4, 6, 8, 10 years — computed as calendar-year deltas
+REGRESSIVE_YEAR_BRACKETS = [
+    (2, 0.35),    # <= 2 years
+    (4, 0.30),    # 2-4 years
+    (6, 0.25),    # 4-6 years
+    (8, 0.20),    # 6-8 years
+    (10, 0.15),   # 8-10 years
 ]
 
 # Progressive IRPF monthly brackets (2026): (up_to, rate, deduction)
@@ -38,28 +38,67 @@ PROGRESSIVE_BRACKETS = [
 ]
 
 
-def regressive_rate(days_held):
-    """Look up regressive tax rate for a given holding period in days."""
-    for max_days, rate in REGRESSIVE_BRACKETS:
-        if days_held <= max_days:
+def regressive_rate(contribution_date, current_date):
+    """Calendar-year based regressive rate lookup.
+
+    Uses dateutil.relativedelta for exact calendar-year boundaries,
+    which correctly handles leap years (e.g. 2024-02-29 + 2yr = 2026-02-28).
+
+    Args:
+        contribution_date: 'YYYY-MM-DD' string or datetime object
+        current_date: 'YYYY-MM-DD' string or datetime object
+    """
+    if isinstance(contribution_date, str):
+        contribution_date = datetime.strptime(contribution_date, '%Y-%m-%d')
+    if isinstance(current_date, str):
+        current_date = datetime.strptime(current_date, '%Y-%m-%d')
+    for years, rate in REGRESSIVE_YEAR_BRACKETS:
+        boundary = contribution_date + relativedelta(years=years)
+        if current_date < boundary:
             return rate
     return 0.10
 
 
+def next_bracket_drop(contribution_date, current_date):
+    """Compute next regressive bracket transition using calendar-year boundaries.
+
+    Returns dict with {rate, days_until, months_until} or None if already at 10%.
+    """
+    if isinstance(contribution_date, str):
+        contribution_date = datetime.strptime(contribution_date, '%Y-%m-%d')
+    if isinstance(current_date, str):
+        current_date = datetime.strptime(current_date, '%Y-%m-%d')
+    for i, (years, rate) in enumerate(REGRESSIVE_YEAR_BRACKETS):
+        boundary = contribution_date + relativedelta(years=years)
+        if current_date < boundary:
+            days_until = (boundary - current_date).days
+            if i + 1 < len(REGRESSIVE_YEAR_BRACKETS):
+                next_rate = REGRESSIVE_YEAR_BRACKETS[i + 1][1]
+            else:
+                next_rate = 0.10
+            return {
+                'rate': next_rate,
+                'days_until': days_until,
+                'months_until': max(1, days_until // 30),
+            }
+    return None  # Already at minimum 10%
+
+
 def calculate_regressive_tax(contributions, withdrawal_amount, plan_type,
                              current_total_value, unit_price=None,
-                             vgbl_premium_remaining=0.0):
+                             vgbl_premium_remaining=0.0, current_date=None):
     """
     FIFO-based regressive tax calculation using certificate units.
 
     Args:
-        contributions: list of dicts with 'units_remaining', 'days_held', 'contribution_date'
-                       sorted oldest-first (FIFO)
+        contributions: list of dicts with 'units_remaining', 'contribution_date'
+                       sorted oldest-first (FIFO). May also include 'days_held'.
         withdrawal_amount: gross withdrawal amount
         plan_type: 'PGBL' or 'VGBL'
         current_total_value: current certificate total value
         unit_price: certificate unit price (total_value / unit_supply)
         vgbl_premium_remaining: certificate-level P_rem for VGBL
+        current_date: 'YYYY-MM-DD' string for calendar-year bracket lookups
     """
     if current_total_value <= 0 or withdrawal_amount <= 0:
         return {'gross': 0, 'tax': 0, 'net': 0, 'effective_rate': 0, 'breakdown': []}
@@ -92,7 +131,9 @@ def calculate_regressive_tax(contributions, withdrawal_amount, plan_type,
         remaining_units -= consumed_units
 
         lot_gross_value = consumed_units * unit_price
-        rate = regressive_rate(contrib['days_held'])
+        contrib_date = contrib.get('contribution_date') or contrib.get('date', '')
+        rate = regressive_rate(contrib_date, current_date) if current_date else regressive_rate(contrib_date, datetime.now().strftime('%Y-%m-%d'))
+        days_held = contrib.get('days_held', 0)
 
         if plan_type == 'PGBL':
             taxable = lot_gross_value
@@ -106,7 +147,8 @@ def calculate_regressive_tax(contributions, withdrawal_amount, plan_type,
         breakdown.append({
             'tranche_amount': round(lot_gross_value, 2),
             'units_consumed': round(consumed_units, 6),
-            'days_held': contrib['days_held'],
+            'days_held': days_held,
+            'contribution_date': contrib_date,
             'rate': rate,
             'taxable': round(taxable, 2),
             'tax': round(tax_on_tranche, 2),
@@ -205,7 +247,7 @@ def estimate_tax(db, certificate_id, withdrawal_amount):
             'units_remaining': c['units_remaining'],
             'remaining_amount': c['remaining_amount'],
             'days_held': days_held,
-            'date': c['contribution_date'],
+            'contribution_date': c['contribution_date'],
         })
 
     result = {
@@ -220,7 +262,7 @@ def estimate_tax(db, certificate_id, withdrawal_amount):
     if cert['tax_regime'] == 'regressive' or cert['tax_regime'] is None:
         result['regressive'] = calculate_regressive_tax(
             contributions, withdrawal_amount, plan_type,
-            total_value, unit_price, P_rem
+            total_value, unit_price, P_rem, current_date=sim_date
         )
 
     if cert['tax_regime'] == 'progressive' or cert['tax_regime'] is None:

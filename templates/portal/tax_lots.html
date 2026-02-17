@@ -19,13 +19,18 @@
     <div class="grid">
         <div>
             <p>Total Value: <strong>R${{ "%.2f"|format(total_value) }}</strong></p>
-            <p>Cost Basis (Remaining): <strong>R${{ "%.2f"|format(total_remaining) }}</strong></p>
+            {% if cert.plan_type == 'VGBL' %}
+            <p>Premium Basis (P<sub>rem</sub>): <strong>R${{ "%.2f"|format(P_rem) }}</strong></p>
+            {% else %}
+            <p>Cost Basis (FIFO Remaining): <strong>R${{ "%.2f"|format(total_remaining) }}</strong></p>
+            {% endif %}
         </div>
         <div>
             <p>Unit Price: <strong>R${{ "%.6f"|format(unit_price) }}</strong> | Unit Supply: <strong>{{ "%.4f"|format(unit_supply) }}</strong></p>
-            <p>Total Earnings: <strong style="color:#4CAF50">R${{ "%.2f"|format(total_value - total_remaining) }}</strong></p>
             {% if cert.plan_type == 'VGBL' %}
-            <p>P<sub>rem</sub> (premium remaining): <strong>R${{ "%.2f"|format(P_rem) }}</strong> | Earnings Ratio: <strong>{{ "%.2f"|format((1 - P_rem / total_value) * 100 if total_value > 0 else 0) }}%</strong></p>
+            <p>Taxable Earnings: <strong style="color:#4CAF50">R${{ "%.2f"|format(total_value - P_rem) }}</strong> ({{ "%.1f"|format((1 - P_rem / total_value) * 100 if total_value > 0 else 0) }}% of value)</p>
+            {% else %}
+            <p>Total Earnings: <strong style="color:#4CAF50">R${{ "%.2f"|format(total_value - total_remaining) }}</strong></p>
             {% endif %}
         </div>
     </div>
@@ -37,7 +42,7 @@
         <li><strong>Units</strong>: each contribution buys certificate units at the current unit price. Lot value = units &times; unit_price.</li>
         <li><strong>Original Amount</strong>: what you contributed (or transferred in)</li>
         <li><strong>Current Value</strong>: units_remaining &times; unit_price (captures actual growth per lot)</li>
-        <li><strong>Earnings</strong>: current value &minus; cost basis. For VGBL, uses certificate-level P<sub>rem</sub> earnings ratio.</li>
+        <li><strong>Earnings</strong>: {% if cert.plan_type == 'VGBL' %}allocated pro-rata using certificate-level earnings ratio = 1 &minus; P<sub>rem</sub>/total_value (not per-lot cost basis){% else %}current value &minus; cost basis{% endif %}</li>
         <li><strong>Regressive Rate</strong>: based on the exact age in days of each lot; rate drops over time (FIFO)</li>
         <li>On withdrawal, the <strong>oldest lots are consumed first</strong> (FIFO). Tax is computed per lot.</li>
     </ul>
@@ -50,7 +55,7 @@
             <th>Lot #</th>
             <th>Date</th>
             <th>Source</th>
-            <th>Original</th>
+            <th>{% if cert.plan_type == 'VGBL' %}Original<br><small style="opacity:0.6">(FIFO-tracked)</small>{% else %}Original{% endif %}</th>
             <th>Units Rem.</th>
             <th>Current Value</th>
             {% if cert.plan_type == 'VGBL' %}<th>Earnings</th>{% endif %}

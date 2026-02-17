@@ -233,38 +233,32 @@ def certificate_detail(cert_id):
     unit_supply = models.get_certificate_unit_supply(db, cert_id)
     P_rem = models.get_vgbl_premium_remaining(db, cert_id)
 
-    # Contribution aging data (tax lots) — days-based with bracket drop fix
+    # Contribution aging data (tax lots) — calendar-year brackets
     sim_date = models.get_sim_date(db)
     current_dt = datetime.strptime(sim_date, '%Y-%m-%d')
+    plan_type = cert['plan_type']
+
+    # VGBL earnings ratio (certificate-level)
+    if plan_type == 'VGBL' and total_value > 0:
+        earnings_ratio = max(0, 1 - P_rem / total_value)
+    else:
+        earnings_ratio = None
+
     contrib_aging = []
     for c in contributions:
         contrib_dt = datetime.strptime(c['contribution_date'], '%Y-%m-%d')
         days_held = max(0, (current_dt - contrib_dt).days)
-        current_rate = tax_engine.regressive_rate(days_held)
-
-        # Fix: find CURRENT bracket boundary, then compute days until it ends
-        next_bracket_info = None
-        current_bracket_end = None
-        for max_d, rate in tax_engine.REGRESSIVE_BRACKETS:
-            if days_held <= max_d:
-                current_bracket_end = max_d
-                break
-        if current_bracket_end is not None and current_bracket_end != float('inf'):
-            days_until = current_bracket_end - days_held + 1
-            months_until = max(1, days_until // 30)
-            # Find the rate of the NEXT bracket
-            next_rate = None
-            for max_d, rate in tax_engine.REGRESSIVE_BRACKETS:
-                if max_d > current_bracket_end:
-                    next_rate = rate
-                    break
-            if next_rate is not None:
-                next_bracket_info = {'rate': next_rate, 'months_until': months_until,
-                                     'days_until': days_until}
+        current_rate = tax_engine.regressive_rate(c['contribution_date'], sim_date)
+        next_bracket_info = tax_engine.next_bracket_drop(c['contribution_date'], sim_date)
 
         # Per-lot current value using certificate units
         lot_current_value = c['units_remaining'] * unit_price if c['units_remaining'] > 0 else 0
-        lot_earnings = lot_current_value - c['remaining_amount'] if c['remaining_amount'] > 0 else 0
+
+        # VGBL: lot earnings use certificate-level earnings_ratio
+        if earnings_ratio is not None:
+            lot_earnings = lot_current_value * earnings_ratio
+        else:
+            lot_earnings = lot_current_value - c['remaining_amount'] if c['remaining_amount'] > 0 else 0
 
         contrib_aging.append({
             'contribution': c,
@@ -667,33 +661,28 @@ def tax_lots(cert_id):
     sim_date = models.get_sim_date(db)
     current_dt = datetime.strptime(sim_date, '%Y-%m-%d')
 
+    plan_type = cert['plan_type']
+
+    # VGBL earnings ratio (certificate-level)
+    if plan_type == 'VGBL' and total_value > 0:
+        earnings_ratio = max(0, 1 - P_rem / total_value)
+    else:
+        earnings_ratio = None
+
     lots = []
     for c in contributions:
         contrib_dt = datetime.strptime(c['contribution_date'], '%Y-%m-%d')
         days_held = max(0, (current_dt - contrib_dt).days)
-        current_rate = tax_engine.regressive_rate(days_held)
-
-        # Fixed bracket drop: find current bracket end, then next rate
-        next_bracket_info = None
-        current_bracket_end = None
-        for max_d, rate in tax_engine.REGRESSIVE_BRACKETS:
-            if days_held <= max_d:
-                current_bracket_end = max_d
-                break
-        if current_bracket_end is not None and current_bracket_end != float('inf'):
-            days_until = current_bracket_end - days_held + 1
-            months_until = max(1, days_until // 30)
-            next_rate = None
-            for max_d, rate in tax_engine.REGRESSIVE_BRACKETS:
-                if max_d > current_bracket_end:
-                    next_rate = rate
-                    break
-            if next_rate is not None:
-                next_bracket_info = {'rate': next_rate, 'months_until': months_until,
-                                     'days_until': days_until}
+        current_rate = tax_engine.regressive_rate(c['contribution_date'], sim_date)
+        next_bracket_info = tax_engine.next_bracket_drop(c['contribution_date'], sim_date)
 
         lot_current_value = c['units_remaining'] * unit_price if c['units_remaining'] > 0 else 0
-        lot_earnings = lot_current_value - c['remaining_amount'] if c['remaining_amount'] > 0 else 0
+
+        # VGBL: lot earnings use certificate-level earnings_ratio
+        if earnings_ratio is not None:
+            lot_earnings = lot_current_value * earnings_ratio
+        else:
+            lot_earnings = lot_current_value - c['remaining_amount'] if c['remaining_amount'] > 0 else 0
 
         lots.append({
             'id': c['id'],

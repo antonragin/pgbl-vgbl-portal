@@ -354,9 +354,15 @@ def consume_lots_fifo(db, cert_id, units_to_consume):
         consumed_amount = c['remaining_amount'] * (take_units / available_units) if available_units > 1e-9 else c['remaining_amount']
         new_remaining_amount = c['remaining_amount'] - consumed_amount
 
+        # Epsilon cleanup: snap near-zero values to 0
+        if new_units_remaining < 1e-9:
+            new_units_remaining = 0.0
+        if new_remaining_amount < 0.01:
+            new_remaining_amount = 0.0
+
         db.execute(
             "UPDATE contributions SET units_remaining = ?, remaining_amount = ? WHERE id = ?",
-            (new_units_remaining, max(0, new_remaining_amount), c['id'])
+            (new_units_remaining, new_remaining_amount, c['id'])
         )
 
         consumed.append({
@@ -621,9 +627,9 @@ def get_certificate_unit_price(db, cert_id):
 
 
 def update_certificate_units(db, cert_id, delta):
-    """Add (or subtract) from certificate's unit_supply."""
+    """Add (or subtract) from certificate's unit_supply. Clamped to >= 0."""
     db.execute(
-        "UPDATE certificates SET unit_supply = unit_supply + ? WHERE id = ?",
+        "UPDATE certificates SET unit_supply = max(0, unit_supply + ?) WHERE id = ?",
         (delta, cert_id)
     )
     db.commit()
@@ -633,6 +639,23 @@ def get_certificate_unit_supply(db, cert_id):
     """Read unit_supply from certificates."""
     row = db.execute("SELECT unit_supply FROM certificates WHERE id = ?", (cert_id,)).fetchone()
     return row['unit_supply'] if row else 0.0
+
+
+def reconcile_certificate_units(db, cert_id):
+    """Recompute unit_supply from sum of lot units_remaining.
+    Returns (old_supply, new_supply). Only writes if there's a meaningful difference."""
+    row = db.execute("SELECT unit_supply FROM certificates WHERE id = ?", (cert_id,)).fetchone()
+    old_supply = row['unit_supply'] if row else 0.0
+    lot_sum = db.execute(
+        "SELECT COALESCE(SUM(units_remaining), 0) as total "
+        "FROM contributions WHERE certificate_id = ?",
+        (cert_id,)
+    ).fetchone()['total']
+    if abs(old_supply - lot_sum) > 1e-6:
+        db.execute("UPDATE certificates SET unit_supply = ? WHERE id = ?",
+                   (max(0, lot_sum), cert_id))
+        db.commit()
+    return old_supply, lot_sum
 
 
 def get_vgbl_premium_remaining(db, cert_id):

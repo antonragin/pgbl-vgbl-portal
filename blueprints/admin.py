@@ -299,8 +299,17 @@ def edit_certificate(user_id, cert_id):
             amount = safe_float(request.form.get('amount'))
             date = request.form.get('date', models.get_sim_date(db))
             if amount > 0:
-                models.add_contribution(db, cert_id, amount, date)
-                flash(f'Contribution of R${amount:,.2f} added.', 'success')
+                unit_price = models.get_certificate_unit_price(db, cert_id)
+                units_issued = amount / unit_price
+                models.add_contribution(db, cert_id, amount, date,
+                                        remaining_amount=amount,
+                                        units_total=units_issued,
+                                        units_remaining=units_issued,
+                                        issue_unit_price=unit_price)
+                models.update_certificate_units(db, cert_id, units_issued)
+                if cert['plan_type'] == 'VGBL':
+                    models.update_vgbl_premium_remaining(db, cert_id, amount)
+                flash(f'Contribution of R${amount:,.2f} added ({units_issued:.4f} units at R${unit_price:.6f}).', 'success')
 
         elif action == 'set_holding':
             fund_id = int(request.form.get('fund_id', 0))
@@ -329,6 +338,13 @@ def edit_certificate(user_id, cert_id):
                 net = gross - tax
                 models.add_withdrawal(db, cert_id, gross, tax, net, date)
                 flash(f'Withdrawal of R${gross:,.2f} recorded.', 'success')
+
+        elif action == 'reconcile_units':
+            old_supply, new_supply = models.reconcile_certificate_units(db, cert_id)
+            if abs(old_supply - new_supply) > 1e-6:
+                flash(f'Unit supply reconciled: {old_supply:.6f} → {new_supply:.6f}', 'success')
+            else:
+                flash(f'Unit supply already consistent ({new_supply:.6f}).', 'info')
 
         return redirect(url_for('admin.edit_certificate',
                                 user_id=user_id, cert_id=cert_id))

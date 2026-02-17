@@ -229,7 +229,7 @@ def _execute_withdrawal(db, req, details, current_date, step_log):
         lot_gross_value = lot['units_consumed'] * unit_price
 
         if cert['tax_regime'] == 'regressive':
-            rate = tax_engine.regressive_rate(days_held)
+            rate = tax_engine.regressive_rate(lot['contribution_date'], current_date)
             if cert['plan_type'] == 'PGBL':
                 taxable = lot_gross_value
             else:
@@ -275,7 +275,9 @@ def _execute_withdrawal(db, req, details, current_date, step_log):
 
     # Record lot allocations for audit (days-based)
     def _rate_fn(lot, dh):
-        return tax_engine.regressive_rate(dh) if cert['tax_regime'] == 'regressive' else 0.15
+        if cert['tax_regime'] == 'regressive':
+            return tax_engine.regressive_rate(lot['contribution_date'], current_date)
+        return 0.15
 
     def _taxable_fn(lot, dh):
         lgv = lot.get('units_consumed', 0) * unit_price
