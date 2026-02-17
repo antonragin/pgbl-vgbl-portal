@@ -107,12 +107,15 @@ def seed():
             year = 2024 + (m // 12)
             month = 1 + (m % 12)
             date = f"{year}-{month:02d}-01"
-            models.add_contribution(db, c1, 2000.0, date)
+            models.add_contribution(db, c1, 2000.0, date,
+                                    units_total=2000.0, units_remaining=2000.0,
+                                    issue_unit_price=1.0)
         # Set holdings (24 months of R$2000 = R$48000, grown by ~20% to ~57600)
         # At NAV 10.0, ~5760 units
         models.set_holding(db, c1, f1, 3000)  # RF DI: 60%
         models.set_holding(db, c1, f4, 2000)  # IPCA: 40%
         models.set_target_allocations(db, c1, [(f1, 60), (f4, 40)])
+        _init_certificate_units(db, c1, 'PGBL')
         print(f"  Carlos PGBL cert #{c1}: 24 months of R$2k contributions, RF/IPCA allocation")
 
         # VGBL certificate - 12 months of contributions
@@ -120,12 +123,15 @@ def seed():
         for m in range(12):
             month = 1 + m
             date = f"2025-{month:02d}-01"
-            models.add_contribution(db, c2, 3000.0, date)
+            models.add_contribution(db, c2, 3000.0, date,
+                                    units_total=3000.0, units_remaining=3000.0,
+                                    issue_unit_price=1.0)
         models.set_holding(db, c2, f1, 1500)  # RF DI: 40%
         models.set_holding(db, c2, f2, 1200)  # Multi: 30%
         models.set_holding(db, c2, f3, 800)   # Equities: 20%
         models.set_holding(db, c2, f4, 400)   # IPCA: 10%
         models.set_target_allocations(db, c2, [(f1, 40), (f2, 30), (f3, 20), (f4, 10)])
+        _init_certificate_units(db, c2, 'VGBL')
         print(f"  Carlos VGBL cert #{c2}: 12 months of R$3k contributions, diversified")
 
         # === User 3 (Maria): qualified investor with large VGBL ===
@@ -133,29 +139,41 @@ def seed():
 
         c3 = models.create_certificate(db, u3, p4, '2023-06-01')
         # Large single contribution
-        models.add_contribution(db, c3, 500000.0, '2023-06-01')
+        models.add_contribution(db, c3, 500000.0, '2023-06-01',
+                                units_total=500000.0, units_remaining=500000.0,
+                                issue_unit_price=1.0)
         # Additional contributions
-        models.add_contribution(db, c3, 100000.0, '2024-01-01')
-        models.add_contribution(db, c3, 50000.0, '2024-06-01')
+        models.add_contribution(db, c3, 100000.0, '2024-01-01',
+                                units_total=100000.0, units_remaining=100000.0,
+                                issue_unit_price=1.0)
+        models.add_contribution(db, c3, 50000.0, '2024-06-01',
+                                units_total=50000.0, units_remaining=50000.0,
+                                issue_unit_price=1.0)
         models.set_holding(db, c3, f3, 30000)  # Heavy equities
         models.set_holding(db, c3, f5, 20000)  # Global equity
         models.set_holding(db, c3, f2, 10000)  # Multi
         models.set_target_allocations(db, c3, [(f3, 50), (f5, 33), (f2, 17)])
         models.set_tax_regime(db, c3, 'regressive')
-        print(f"  Maria VGBL cert #{c3}: R$650k contributed, equities-heavy, regressive regime")
+
+        # Maria: sample external transfer-in contribution
+        # External port-in: embedded_gain_pct = 0.80, so P_rem for this = 75000 * 0.80 = 60000
+        models.add_contribution(db, c3, 75000.0, '2025-06-01',
+                                source_type='transfer_external',
+                                units_total=75000.0, units_remaining=75000.0,
+                                issue_unit_price=1.0)
+        _init_certificate_units(db, c3, 'VGBL', external_transfer_amounts=[75000.0])
+        print(f"  Maria VGBL cert #{c3}: R$725k total, equities-heavy, regressive regime")
 
         # Maria: second VGBL certificate (for internal transfers demo)
         c4 = models.create_certificate(db, u3, p3, '2024-01-01')
-        models.add_contribution(db, c4, 50000.0, '2024-01-01')
+        models.add_contribution(db, c4, 50000.0, '2024-01-01',
+                                units_total=50000.0, units_remaining=50000.0,
+                                issue_unit_price=1.0)
         models.set_holding(db, c4, f1, 3000)
         models.set_holding(db, c4, f4, 2000)
         models.set_target_allocations(db, c4, [(f1, 60), (f4, 40)])
+        _init_certificate_units(db, c4, 'VGBL')
         print(f"  Maria VGBL cert #{c4}: R$50k, RF/IPCA allocation (for transfer demo)")
-
-        # Maria: sample external transfer-in contribution
-        models.add_contribution(db, c3, 75000.0, '2025-06-01',
-                                source_type='transfer_external')
-        print(f"  Maria cert #{c3}: added R$75k external transfer-in contribution")
 
         # Maria: IOF declaration — she has R$200k VGBL contributions at another issuer
         models.set_iof_declaration(db, u3, 2025, 200000.0)
@@ -168,6 +186,19 @@ def seed():
             {'pct': 40, 'years_ago': 11},
         ])
         print(f"  Default external port-in schedule seeded (30%/1yr, 30%/5yr, 40%/11yr)")
+
+        # Seed IOF config (configurable thresholds per year)
+        models.set_iof_config(db, {
+            'thresholds': [
+                {'year_from': 2025, 'year_to': 2025, 'limit': 300000, 'rate': 0.05},
+                {'year_from': 2026, 'year_to': 9999, 'limit': 600000, 'rate': 0.05},
+            ]
+        })
+        print(f"  IOF config seeded (2025: R$300k, 2026+: R$600k, 5% rate)")
+
+        # Seed embedded gain percentage for external port-in
+        models.set_external_portin_gain_pct(db, 0.80)
+        print(f"  External port-in embedded gain pct: 80%")
 
         # === Sample Requests ===
         # Completed requests
@@ -203,6 +234,36 @@ def seed():
         print(f"  Login password for all users: 1234")
 
         db.close()
+
+
+def _init_certificate_units(db, cert_id, plan_type, external_transfer_amounts=None):
+    """Initialize unit_supply and vgbl_premium_remaining for a seeded certificate.
+
+    At seed time, unit_price=1.0, so unit_supply = sum of all contribution amounts.
+    For VGBL: P_rem = sum of regular contributions + (external_transfers * embedded_gain_pct).
+    """
+    contribs = models.list_contributions(db, cert_id)
+    total_units = sum(c['units_total'] for c in contribs)
+
+    # Set certificate unit_supply
+    db.execute("UPDATE certificates SET unit_supply = ? WHERE id = ?",
+               (total_units, cert_id))
+
+    # For VGBL, compute premium_remaining
+    if plan_type == 'VGBL':
+        # Regular contributions: full amount is premium
+        regular_premium = sum(c['amount'] for c in contribs
+                              if c['source_type'] == 'contribution')
+        # External transfers: use embedded_gain_pct
+        embedded_gain_pct = models.get_external_portin_gain_pct(db)
+        ext_premium = 0.0
+        if external_transfer_amounts:
+            ext_premium = sum(a * embedded_gain_pct for a in external_transfer_amounts)
+        total_prem = regular_premium + ext_premium
+        db.execute("UPDATE certificates SET vgbl_premium_remaining = ? WHERE id = ?",
+                   (total_prem, cert_id))
+
+    db.commit()
 
 
 def _store_returns(db, fund_id, returns):

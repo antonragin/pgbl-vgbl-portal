@@ -3,6 +3,7 @@
 import io
 import json
 import functools
+from datetime import datetime
 from flask import (Blueprint, render_template, session, redirect, url_for,
                    request, flash, g, Response)
 import models
@@ -227,30 +228,48 @@ def certificate_detail(cert_id):
     target_allocs = models.get_target_allocations(db, cert_id)
     cert_requests = models.list_requests(db, cert_id=cert_id)
 
-    # Contribution aging data (tax lots)
-    sim_month = models.get_sim_month(db)
-    growth_factor = total_value / total_remaining if total_remaining > 0 else 1.0
+    # Certificate units info
+    unit_price = models.get_certificate_unit_price(db, cert_id)
+    unit_supply = models.get_certificate_unit_supply(db, cert_id)
+    P_rem = models.get_vgbl_premium_remaining(db, cert_id)
+
+    # Contribution aging data (tax lots) — days-based with bracket drop fix
+    sim_date = models.get_sim_date(db)
+    current_dt = datetime.strptime(sim_date, '%Y-%m-%d')
     contrib_aging = []
     for c in contributions:
-        months_held = sim_month - tax_engine._date_to_sim_month(c['contribution_date'])
-        if months_held < 0:
-            months_held = 0
-        current_rate = tax_engine.regressive_rate(months_held)
-        # Find next bracket drop
-        next_bracket_info = None
-        for max_m, rate in tax_engine.REGRESSIVE_BRACKETS:
-            if months_held <= max_m and rate < current_rate:
-                months_until = max_m - months_held + 1 if max_m != float('inf') else None
-                next_bracket_info = {'rate': rate, 'months_until': months_until}
-                break
+        contrib_dt = datetime.strptime(c['contribution_date'], '%Y-%m-%d')
+        days_held = max(0, (current_dt - contrib_dt).days)
+        current_rate = tax_engine.regressive_rate(days_held)
 
-        # Per-lot current value and earnings (for VGBL)
-        lot_current_value = c['remaining_amount'] * growth_factor if c['remaining_amount'] > 0 else 0
+        # Fix: find CURRENT bracket boundary, then compute days until it ends
+        next_bracket_info = None
+        current_bracket_end = None
+        for max_d, rate in tax_engine.REGRESSIVE_BRACKETS:
+            if days_held <= max_d:
+                current_bracket_end = max_d
+                break
+        if current_bracket_end is not None and current_bracket_end != float('inf'):
+            days_until = current_bracket_end - days_held + 1
+            months_until = max(1, days_until // 30)
+            # Find the rate of the NEXT bracket
+            next_rate = None
+            for max_d, rate in tax_engine.REGRESSIVE_BRACKETS:
+                if max_d > current_bracket_end:
+                    next_rate = rate
+                    break
+            if next_rate is not None:
+                next_bracket_info = {'rate': next_rate, 'months_until': months_until,
+                                     'days_until': days_until}
+
+        # Per-lot current value using certificate units
+        lot_current_value = c['units_remaining'] * unit_price if c['units_remaining'] > 0 else 0
         lot_earnings = lot_current_value - c['remaining_amount'] if c['remaining_amount'] > 0 else 0
 
         contrib_aging.append({
             'contribution': c,
-            'months_held': months_held,
+            'days_held': days_held,
+            'months_held': days_held // 30,
             'current_rate': current_rate,
             'next_bracket': next_bracket_info,
             'lot_current_value': lot_current_value,
@@ -265,7 +284,9 @@ def certificate_detail(cert_id):
                            target_allocs=target_allocs, requests=cert_requests,
                            gain=total_value - total_contribs,
                            contrib_aging=contrib_aging,
-                           plan_type=cert['plan_type'])
+                           plan_type=cert['plan_type'],
+                           unit_price=unit_price, unit_supply=unit_supply,
+                           P_rem=P_rem)
 
 
 # ---------------------------------------------------------------------------
@@ -310,11 +331,12 @@ def contribute(cert_id):
 
         return redirect(url_for('portal.contribute', cert_id=cert_id))
 
-    # IOF warning
+    # IOF warning (using configurable threshold)
     iof_warning = None
     if cert['plan_type'] == 'VGBL':
         sim_date = models.get_sim_date(db)
         year = int(sim_date[:4])
+        iof_limit, iof_rate = models.get_iof_limit_for_year(db, year)
         # Only count source_type='contribution' for IOF base
         existing_vgbl = db.execute("""
             SELECT COALESCE(SUM(co.amount), 0) as total
@@ -327,10 +349,11 @@ def contribute(cert_id):
         """, (session['user_id'], f'{year}-01-01', f'{year}-12-31')).fetchone()['total']
         declared = models.get_iof_declaration(db, session['user_id'], year)
         total_vgbl = existing_vgbl + declared
-        remaining_exempt = max(0, 600000 - total_vgbl)
+        remaining_exempt = max(0, iof_limit - total_vgbl)
         if remaining_exempt < 100000:
             iof_warning = (f'VGBL contributions this year (internal + declared): R${total_vgbl:,.2f}. '
-                          f'R${remaining_exempt:,.2f} remaining before 5% IOF applies.')
+                          f'R${remaining_exempt:,.2f} remaining before {iof_rate*100:.0f}% IOF applies '
+                          f'(limit: R${iof_limit:,.0f}).')
 
     target_allocs = models.get_target_allocations(db, cert_id)
     return render_template('portal/contribute.html',
@@ -599,6 +622,7 @@ def iof_declaration():
         return redirect(url_for('portal.iof_declaration'))
 
     current_declaration = models.get_iof_declaration(db, user_id, year)
+    iof_limit, iof_rate = models.get_iof_limit_for_year(db, year)
 
     # Get internal VGBL contributions this year
     internal_vgbl = db.execute("""
@@ -612,12 +636,13 @@ def iof_declaration():
     """, (user_id, f'{year}-01-01', f'{year}-12-31')).fetchone()['total']
 
     total = internal_vgbl + current_declaration
-    remaining_exempt = max(0, 600000 - total)
+    remaining_exempt = max(0, iof_limit - total)
 
     return render_template('portal/iof_declaration.html',
                            year=year, current_declaration=current_declaration,
                            internal_vgbl=internal_vgbl, total=total,
-                           remaining_exempt=remaining_exempt)
+                           remaining_exempt=remaining_exempt,
+                           iof_limit=iof_limit, iof_rate=iof_rate)
 
 
 # ---------------------------------------------------------------------------
@@ -636,22 +661,38 @@ def tax_lots(cert_id):
     contributions = models.list_contributions(db, cert_id)
     total_value = models.get_certificate_total_value(db, cert_id)
     total_remaining = models.total_remaining_contributions(db, cert_id)
-    growth_factor = total_value / total_remaining if total_remaining > 0 else 1.0
-    sim_month = models.get_sim_month(db)
+    unit_price = models.get_certificate_unit_price(db, cert_id)
+    unit_supply = models.get_certificate_unit_supply(db, cert_id)
+    P_rem = models.get_vgbl_premium_remaining(db, cert_id)
+    sim_date = models.get_sim_date(db)
+    current_dt = datetime.strptime(sim_date, '%Y-%m-%d')
 
     lots = []
     for c in contributions:
-        months_held = max(0, sim_month - tax_engine._date_to_sim_month(c['contribution_date']))
-        current_rate = tax_engine.regressive_rate(months_held)
+        contrib_dt = datetime.strptime(c['contribution_date'], '%Y-%m-%d')
+        days_held = max(0, (current_dt - contrib_dt).days)
+        current_rate = tax_engine.regressive_rate(days_held)
 
+        # Fixed bracket drop: find current bracket end, then next rate
         next_bracket_info = None
-        for max_m, rate in tax_engine.REGRESSIVE_BRACKETS:
-            if months_held <= max_m and rate < current_rate:
-                months_until = max_m - months_held + 1 if max_m != float('inf') else None
-                next_bracket_info = {'rate': rate, 'months_until': months_until}
+        current_bracket_end = None
+        for max_d, rate in tax_engine.REGRESSIVE_BRACKETS:
+            if days_held <= max_d:
+                current_bracket_end = max_d
                 break
+        if current_bracket_end is not None and current_bracket_end != float('inf'):
+            days_until = current_bracket_end - days_held + 1
+            months_until = max(1, days_until // 30)
+            next_rate = None
+            for max_d, rate in tax_engine.REGRESSIVE_BRACKETS:
+                if max_d > current_bracket_end:
+                    next_rate = rate
+                    break
+            if next_rate is not None:
+                next_bracket_info = {'rate': next_rate, 'months_until': months_until,
+                                     'days_until': days_until}
 
-        lot_current_value = c['remaining_amount'] * growth_factor if c['remaining_amount'] > 0 else 0
+        lot_current_value = c['units_remaining'] * unit_price if c['units_remaining'] > 0 else 0
         lot_earnings = lot_current_value - c['remaining_amount'] if c['remaining_amount'] > 0 else 0
 
         lots.append({
@@ -660,7 +701,10 @@ def tax_lots(cert_id):
             'source_type': c['source_type'],
             'original_amount': c['amount'],
             'remaining_amount': c['remaining_amount'],
-            'months_held': months_held,
+            'units_total': c['units_total'],
+            'units_remaining': c['units_remaining'],
+            'days_held': days_held,
+            'months_held': days_held // 30,
             'current_rate': current_rate,
             'next_bracket': next_bracket_info,
             'current_value': lot_current_value,
@@ -671,7 +715,8 @@ def tax_lots(cert_id):
                            cert=cert, lots=lots,
                            total_value=total_value,
                            total_remaining=total_remaining,
-                           growth_factor=growth_factor)
+                           unit_price=unit_price, unit_supply=unit_supply,
+                           P_rem=P_rem)
 
 
 # ---------------------------------------------------------------------------

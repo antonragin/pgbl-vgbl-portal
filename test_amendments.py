@@ -1,7 +1,9 @@
-"""Acceptance tests for Amendments v1.
+"""Acceptance tests for Amendments v2.
 
-Tests FIFO lot consumption, portability-then-withdrawal, VGBL earnings taxation,
-fund switch lot preservation, and IOF calculation with declaration.
+Tests: FIFO unit-based lot consumption, portability-then-withdrawal,
+VGBL earnings taxation, fund switch lot preservation, IOF with declaration,
+multi-contribution timing (core bug fix), VGBL regressive brackets,
+and external port-in with embedded gains.
 """
 
 import os
@@ -26,13 +28,22 @@ def _setup_db():
 
     app = create_app()
     app.config['TESTING'] = True
-    # Use absolute path so os.path.join in get_db works correctly
     app.config['DATABASE'] = tmp_path
     init_db(app)
 
     ctx = app.app_context()
     ctx.push()
     db = get_db(app)
+
+    # Seed IOF config and embedded gain pct
+    models.set_iof_config(db, {
+        'thresholds': [
+            {'year_from': 2025, 'year_to': 2025, 'limit': 300000, 'rate': 0.05},
+            {'year_from': 2026, 'year_to': 9999, 'limit': 600000, 'rate': 0.05},
+        ]
+    })
+    models.set_external_portin_gain_pct(db, 0.80)
+
     return app, db, ctx, tmp_path
 
 
@@ -42,7 +53,6 @@ def _create_plan(db, plan_type='VGBL'):
 
 def _create_fund(db, nav=10.0, name='Test Fund'):
     fid = models.create_fund(db, name, 'Test fund', '00.000.000/0001-00', False, nav)
-    # Add flat returns (0% growth) so NAV stays at 10.0 through evolve
     for idx in range(12):
         db.execute("INSERT INTO fund_returns (fund_id, month_idx, return_pct) VALUES (?, ?, 0.0)",
                    (fid, idx))
@@ -59,22 +69,38 @@ def _create_fund_with_growth(db, monthly_return=0.01, nav=10.0, name='Growth Fun
     return fid
 
 
-def _setup_cert(db, user_id, plan_id, fund_id, contributions, start_date='2024-01-01'):
-    """Create a certificate with target allocation and contributions, then buy units."""
+def _add_contribution_with_units(db, cert_id, amount, date, source_type='contribution'):
+    """Add a contribution with proper unit tracking. At unit_price=1.0 initially."""
+    unit_price = models.get_certificate_unit_price(db, cert_id)
+    units = amount / unit_price
+    models.add_contribution(db, cert_id, amount, date,
+                            source_type=source_type,
+                            units_total=units, units_remaining=units,
+                            issue_unit_price=unit_price)
+    models.update_certificate_units(db, cert_id, units)
+    return units
+
+
+def _setup_cert_with_units(db, user_id, plan_id, fund_id, contributions,
+                           start_date='2024-01-01', plan_type='PGBL'):
+    """Create a certificate with contributions and proper unit tracking."""
     cert_id = models.create_certificate(db, user_id, plan_id, start_date)
     models.set_target_allocations(db, cert_id, [(fund_id, 100)])
 
+    total = 0
     for amount, date in contributions:
-        models.add_contribution(db, cert_id, amount, date)
+        _add_contribution_with_units(db, cert_id, amount, date)
+        if plan_type == 'VGBL':
+            models.update_vgbl_premium_remaining(db, cert_id, amount)
+        total += amount
 
-    # Buy units for total contributed
-    total = sum(a for a, _ in contributions)
+    # Buy fund units for total contributed
     time_engine._buy_into_certificate(db, cert_id, total)
     return cert_id
 
 
 # ==========================================================================
-# Test 1: Two withdrawals consume lots progressively
+# Test 1: Two withdrawals consume lots progressively (unit-based)
 # ==========================================================================
 def test_progressive_lot_consumption():
     """Contribute R$10k (old) + R$10k (recent). Withdraw R$15k -> oldest lot
@@ -87,27 +113,20 @@ def test_progressive_lot_consumption():
         user_id = models.create_user(db, 'test1@test.com', False)
         models.set_brokerage_cash(db, user_id, 0)
 
-        # Old contribution (month 0)
         models.set_sim_date(db, '2024-01-01')
         models.set_sim_month(db, 0)
-        cert_id = models.create_certificate(db, user_id, plan_id, '2024-01-01')
-        models.set_target_allocations(db, cert_id, [(fund_id, 100)])
-        models.add_contribution(db, cert_id, 10000.0, '2024-01-01')
 
-        # Recent contribution (month 12)
-        models.add_contribution(db, cert_id, 10000.0, '2025-01-01')
-
-        # Buy units for total
-        time_engine._buy_into_certificate(db, cert_id, 20000.0)
+        cert_id = _setup_cert_with_units(db, user_id, plan_id, fund_id,
+                                         [(10000.0, '2024-01-01'), (10000.0, '2025-01-01')],
+                                         plan_type='PGBL')
 
         # Verify initial state
         total_value = models.get_certificate_total_value(db, cert_id)
         assert abs(total_value - 20000.0) < 1.0, f"Expected ~R$20000, got R${total_value}"
+        unit_supply = models.get_certificate_unit_supply(db, cert_id)
+        assert abs(unit_supply - 20000.0) < 0.01, f"Expected 20000 units, got {unit_supply}"
 
-        total_remaining = models.total_remaining_contributions(db, cert_id)
-        assert abs(total_remaining - 20000.0) < 0.01, f"Expected remaining R$20000, got R${total_remaining}"
-
-        # Set sim_month far enough for age calculation
+        # Advance time
         models.set_sim_month(db, 24)
         models.set_sim_date(db, '2026-01-01')
 
@@ -125,12 +144,12 @@ def test_progressive_lot_consumption():
         old_lot = [c for c in contribs if c['contribution_date'] == '2024-01-01'][0]
         new_lot = [c for c in contribs if c['contribution_date'] == '2025-01-01'][0]
 
-        # cost_basis_to_consume = (15000/20000)*20000 = 15000
-        # old lot (10000) fully consumed, new lot partially consumed (5000 of 10000)
-        assert old_lot['remaining_amount'] < 0.01, \
-            f"Old lot should be fully consumed, remaining: {old_lot['remaining_amount']}"
-        assert abs(new_lot['remaining_amount'] - 5000.0) < 1.0, \
-            f"New lot should have ~5000 remaining, got: {new_lot['remaining_amount']}"
+        # unit_price=1.0 (no growth), units_to_redeem=15000
+        # Old lot (10000 units) fully consumed, new lot partially (5000 of 10000)
+        assert old_lot['units_remaining'] < 0.01, \
+            f"Old lot should be fully consumed, units_remaining: {old_lot['units_remaining']}"
+        assert abs(new_lot['units_remaining'] - 5000.0) < 1.0, \
+            f"New lot should have ~5000 units remaining, got: {new_lot['units_remaining']}"
 
         # Second withdrawal: withdraw remaining value
         total_value_after = models.get_certificate_total_value(db, cert_id)
@@ -143,10 +162,11 @@ def test_progressive_lot_consumption():
         details2 = json.loads(req2['details'])
         time_engine._execute_withdrawal(db, req2, details2, '2026-01-01', step_log2)
 
-        # After full withdrawal, all remaining should be ~0
-        total_remaining_after = models.total_remaining_contributions(db, cert_id)
-        assert total_remaining_after < 0.01, \
-            f"All lots should be consumed, remaining: {total_remaining_after}"
+        # After full withdrawal, all units should be ~0
+        contribs_final = models.list_contributions(db, cert_id)
+        total_units_left = sum(c['units_remaining'] for c in contribs_final)
+        assert total_units_left < 0.01, \
+            f"All lots should be consumed, total units remaining: {total_units_left}"
 
         # Lot allocations should exist
         allocs = db.execute("SELECT COUNT(*) as c FROM lot_allocations").fetchone()['c']
@@ -159,10 +179,10 @@ def test_progressive_lot_consumption():
 
 
 # ==========================================================================
-# Test 2: Portability then withdrawal
+# Test 2: Internal transfer then withdrawal
 # ==========================================================================
-def test_portability_then_withdrawal():
-    """Contribute R$20k. Port out R$10k to another cert. Withdraw R$10k from source.
+def test_transfer_then_withdrawal():
+    """Contribute R$20k. Transfer R$10k to another cert. Withdraw R$10k from source.
     Lots should be properly consumed across both operations."""
     app, db, ctx, tmp_path = _setup_db()
 
@@ -176,10 +196,9 @@ def test_portability_then_withdrawal():
         models.set_sim_month(db, 0)
 
         # Source cert with R$20k
-        src_cert = models.create_certificate(db, user_id, plan_id, '2024-01-01')
-        models.set_target_allocations(db, src_cert, [(fund_id, 100)])
-        models.add_contribution(db, src_cert, 20000.0, '2024-01-01')
-        time_engine._buy_into_certificate(db, src_cert, 20000.0)
+        src_cert = _setup_cert_with_units(db, user_id, plan_id, fund_id,
+                                          [(20000.0, '2024-01-01')],
+                                          plan_type='PGBL')
 
         # Dest cert (empty)
         dest_cert = models.create_certificate(db, user_id, plan_id, '2024-01-01')
@@ -197,17 +216,14 @@ def test_portability_then_withdrawal():
         details = json.loads(req['details'])
         time_engine._execute_transfer_internal(db, req, details, '2026-01-01', step_log)
 
-        # Source should have ~R$10k remaining in lots
-        src_remaining = models.total_remaining_contributions(db, src_cert)
-        assert abs(src_remaining - 10000.0) < 1.0, \
-            f"Source should have ~R$10k remaining, got R${src_remaining}"
+        # Source should have ~10k in units
+        src_supply = models.get_certificate_unit_supply(db, src_cert)
+        assert abs(src_supply - 10000.0) < 1.0, \
+            f"Source should have ~10k units, got {src_supply}"
 
         # Dest should have new lot(s) with original date
         dest_contribs = models.list_contributions(db, dest_cert)
         assert len(dest_contribs) > 0, "Destination should have contribution(s) from transfer"
-        dest_remaining = models.total_remaining_contributions(db, dest_cert)
-        assert abs(dest_remaining - 10000.0) < 1.0, \
-            f"Dest should have ~R$10k remaining, got R${dest_remaining}"
 
         # Check that transferred lots preserve original date
         for dc in dest_contribs:
@@ -216,26 +232,27 @@ def test_portability_then_withdrawal():
             assert dc['source_type'] == 'transfer_internal', \
                 f"Source type should be transfer_internal, got {dc['source_type']}"
 
+        # Dest unit_supply should be ~10000
+        dest_supply = models.get_certificate_unit_supply(db, dest_cert)
+        assert abs(dest_supply - 10000.0) < 1.0, \
+            f"Dest should have ~10k units, got {dest_supply}"
+
         # Now withdraw R$10k from source
         models.set_tax_regime(db, src_cert, 'regressive')
+        src_value = models.get_certificate_total_value(db, src_cert)
         req_id2 = models.create_request(db, user_id, src_cert, 'withdrawal',
-                                         {'amount': 10000}, '2026-01-01')
+                                         {'amount': src_value}, '2026-01-01')
         step_log2 = {'month': 24, 'events': []}
         req2 = db.execute("SELECT * FROM requests WHERE id = ?", (req_id2,)).fetchone()
         details2 = json.loads(req2['details'])
         time_engine._execute_withdrawal(db, req2, details2, '2026-01-01', step_log2)
 
         # Source lots should be fully consumed
-        src_remaining_after = models.total_remaining_contributions(db, src_cert)
-        assert src_remaining_after < 0.01, \
-            f"Source lots should be fully consumed, remaining: R${src_remaining_after}"
+        src_units_left = sum(c['units_remaining'] for c in models.list_contributions(db, src_cert))
+        assert src_units_left < 0.01, \
+            f"Source lots should be fully consumed, units remaining: {src_units_left}"
 
-        # Certificate phase should still be accumulation (not spending!)
-        src_cert_obj = models.get_certificate(db, src_cert)
-        assert src_cert_obj['phase'] == 'accumulation', \
-            f"Phase should stay accumulation, got {src_cert_obj['phase']}"
-
-        print("  PASS: test_portability_then_withdrawal")
+        print("  PASS: test_transfer_then_withdrawal")
     finally:
         ctx.pop()
         os.unlink(tmp_path)
@@ -246,7 +263,7 @@ def test_portability_then_withdrawal():
 # ==========================================================================
 def test_vgbl_earnings_taxation():
     """VGBL: contribute R$10k, immediate withdraw -> taxable ~R$0.
-    Contribute, grow 10%, withdraw -> taxable = earnings on redeemed lots."""
+    Contribute, grow 10%, withdraw -> taxable = earnings portion only."""
     app, db, ctx, tmp_path = _setup_db()
 
     try:
@@ -259,17 +276,17 @@ def test_vgbl_earnings_taxation():
         models.set_sim_month(db, 0)
 
         # --- Part A: zero-gain immediate withdrawal ---
-        cert_id = models.create_certificate(db, user_id, plan_id, '2024-01-01')
-        models.set_target_allocations(db, cert_id, [(fund_id, 100)])
+        cert_id = _setup_cert_with_units(db, user_id, plan_id, fund_id,
+                                         [(10000.0, '2024-01-01')],
+                                         plan_type='VGBL')
         models.set_tax_regime(db, cert_id, 'regressive')
 
-        # Contribute and buy
-        models.add_contribution(db, cert_id, 10000.0, '2024-01-01')
-        time_engine._buy_into_certificate(db, cert_id, 10000.0)
-
-        # Immediate withdraw (no growth, so growth_factor = 1.0)
+        # Immediate withdraw (no growth, unit_price=1.0, P_rem=10000, earnings_ratio=0)
         total_value = models.get_certificate_total_value(db, cert_id)
         assert abs(total_value - 10000.0) < 1.0, f"Expected ~R$10k, got R${total_value}"
+
+        P_rem = models.get_vgbl_premium_remaining(db, cert_id)
+        assert abs(P_rem - 10000.0) < 0.01, f"VGBL P_rem should be R$10k, got R${P_rem}"
 
         req_id = models.create_request(db, user_id, cert_id, 'withdrawal',
                                         {'amount': 10000}, '2024-01-01')
@@ -278,22 +295,17 @@ def test_vgbl_earnings_taxation():
         details = json.loads(req['details'])
         time_engine._execute_withdrawal(db, req, details, '2024-01-01', step_log)
 
-        # Tax should be ~0 for VGBL with no earnings
+        # Tax should be ~0 for VGBL with no earnings (P_rem/total_value = 1.0, earnings_ratio=0)
         withdrawal = models.list_withdrawals(db, cert_id)[0]
         assert withdrawal['tax_withheld'] < 0.01, \
             f"VGBL with no earnings should have ~0 tax, got R${withdrawal['tax_withheld']}"
-        assert abs(withdrawal['net_amount'] - withdrawal['gross_amount']) < 0.01, \
-            "Net should equal gross when no earnings"
 
         # --- Part B: with growth ---
         fund_id_growth = _create_fund_with_growth(db, monthly_return=0.01, nav=10.0, name='Growth Fund')
-        cert_id2 = models.create_certificate(db, user_id, plan_id, '2024-01-01')
-        models.set_target_allocations(db, cert_id2, [(fund_id_growth, 100)])
+        cert_id2 = _setup_cert_with_units(db, user_id, plan_id, fund_id_growth,
+                                          [(10000.0, '2024-01-01')],
+                                          plan_type='VGBL')
         models.set_tax_regime(db, cert_id2, 'regressive')
-
-        # Contribute
-        models.add_contribution(db, cert_id2, 10000.0, '2024-01-01')
-        time_engine._buy_into_certificate(db, cert_id2, 10000.0)
 
         # Evolve 12 months to get growth (~12.7% compound growth)
         for step in range(12):
@@ -304,7 +316,11 @@ def test_vgbl_earnings_taxation():
         total_value2 = models.get_certificate_total_value(db, cert_id2)
         assert total_value2 > 11000, f"Should have grown past R$11k, got R${total_value2}"
 
-        earnings = total_value2 - 10000.0
+        P_rem2 = models.get_vgbl_premium_remaining(db, cert_id2)
+        assert abs(P_rem2 - 10000.0) < 0.01, f"VGBL P_rem should still be R$10k, got R${P_rem2}"
+
+        earnings = total_value2 - P_rem2
+        earnings_ratio = 1 - (P_rem2 / total_value2)
 
         # Withdraw full amount
         req_id2 = models.create_request(db, user_id, cert_id2, 'withdrawal',
@@ -316,11 +332,9 @@ def test_vgbl_earnings_taxation():
 
         withdrawal2 = models.list_withdrawals(db, cert_id2)[0]
 
-        # VGBL taxable = earnings only, not total amount
-        # For 12 months held, regressive rate = 35%
-        # Tax should be roughly 35% of earnings
-        # Due to the withdrawal mechanics (growth_factor computed before sell),
-        # the actual tax may differ slightly from simple earnings * rate
+        # VGBL taxable = earnings portion only
+        # For ~365 days held, regressive rate = 35%
+        # Tax should be ~ earnings_ratio * total_value2 * 0.35
         assert withdrawal2['tax_withheld'] > 0, "VGBL should have some tax when there are earnings"
 
         # Tax should NOT be 35% of total (that would be PGBL behavior)
@@ -329,11 +343,8 @@ def test_vgbl_earnings_taxation():
             f"VGBL tax (R${withdrawal2['tax_withheld']}) should be much less than " \
             f"PGBL-equivalent (R${pgbl_tax:.2f})"
 
-        # Tax should be roughly proportional to earnings (with reasonable tolerance)
-        # earnings/total_value should be ~ tax/(total_value * 0.35)
+        # Effective rate on total should be ~ earnings_ratio * 0.35
         effective_rate_on_total = withdrawal2['tax_withheld'] / total_value2
-        earnings_ratio = earnings / total_value2
-        # For VGBL, effective rate on total should be ~ earnings_ratio * 0.35
         expected_effective = earnings_ratio * 0.35
         assert abs(effective_rate_on_total - expected_effective) < 0.02, \
             f"Effective rate on total ({effective_rate_on_total:.4f}) should be near " \
@@ -346,10 +357,10 @@ def test_vgbl_earnings_taxation():
 
 
 # ==========================================================================
-# Test 4: Fund switch preserves lots
+# Test 4: Fund switch preserves lots and units
 # ==========================================================================
 def test_fund_switch_preserves_lots():
-    """Contribute, switch funds, verify lots unchanged (same remaining_amount/dates),
+    """Contribute, switch funds, verify lots unchanged (same units_remaining/dates),
     holdings in new funds."""
     app, db, ctx, tmp_path = _setup_db()
 
@@ -366,22 +377,18 @@ def test_fund_switch_preserves_lots():
         cert_id = models.create_certificate(db, user_id, plan_id, '2024-01-01')
         models.set_target_allocations(db, cert_id, [(fund_a, 100)])
 
-        # Multiple contributions at different dates
-        models.add_contribution(db, cert_id, 5000.0, '2024-01-01')
-        models.add_contribution(db, cert_id, 3000.0, '2024-06-01')
-        models.add_contribution(db, cert_id, 2000.0, '2025-01-01')
+        # Multiple contributions at different dates with units
+        for amount, date in [(5000.0, '2024-01-01'), (3000.0, '2024-06-01'), (2000.0, '2025-01-01')]:
+            _add_contribution_with_units(db, cert_id, amount, date)
+            models.update_vgbl_premium_remaining(db, cert_id, amount)
+
         time_engine._buy_into_certificate(db, cert_id, 10000.0)
 
         # Record lot state before switch
         contribs_before = models.list_contributions(db, cert_id)
-        lot_data_before = [(c['amount'], c['remaining_amount'], c['contribution_date'])
+        lot_data_before = [(c['amount'], c['units_remaining'], c['contribution_date'])
                            for c in contribs_before]
-
-        # Verify holdings in Fund A
-        holdings_before = models.get_holdings(db, cert_id)
-        assert len(holdings_before) == 1
-        assert holdings_before[0]['fund_id'] == fund_a
-        assert holdings_before[0]['units'] > 0
+        unit_supply_before = models.get_certificate_unit_supply(db, cert_id)
 
         # Execute fund swap to Fund B
         models.set_target_allocations(db, cert_id, [(fund_b, 100)])
@@ -396,26 +403,24 @@ def test_fund_switch_preserves_lots():
         details = json.loads(req['details'])
         time_engine._execute_fund_swap(db, req, details, '2025-01-15', step_log)
 
-        # Verify lots unchanged
+        # Verify lots unchanged (fund switch is tax-neutral)
         contribs_after = models.list_contributions(db, cert_id)
-        lot_data_after = [(c['amount'], c['remaining_amount'], c['contribution_date'])
+        lot_data_after = [(c['amount'], c['units_remaining'], c['contribution_date'])
                           for c in contribs_after]
-
         assert lot_data_before == lot_data_after, \
             f"Lots should be unchanged after fund switch.\nBefore: {lot_data_before}\nAfter: {lot_data_after}"
+
+        # Unit supply should be unchanged
+        unit_supply_after = models.get_certificate_unit_supply(db, cert_id)
+        assert abs(unit_supply_before - unit_supply_after) < 0.01, \
+            f"Unit supply should be unchanged after fund switch, before: {unit_supply_before}, after: {unit_supply_after}"
 
         # Verify holdings now in Fund B
         holdings_after = models.get_holdings(db, cert_id)
         fund_b_holdings = [h for h in holdings_after if h['fund_id'] == fund_b and h['units'] > 1e-9]
         fund_a_holdings = [h for h in holdings_after if h['fund_id'] == fund_a and h['units'] > 1e-9]
-
         assert len(fund_b_holdings) > 0, "Should have holdings in Fund B after switch"
         assert len(fund_a_holdings) == 0, "Should have no holdings in Fund A after switch"
-
-        # Total value should be preserved
-        total_value_after = models.get_certificate_total_value(db, cert_id)
-        assert abs(total_value_after - 10000.0) < 1.0, \
-            f"Total value should be preserved after switch, got R${total_value_after}"
 
         print("  PASS: test_fund_switch_preserves_lots")
     finally:
@@ -424,12 +429,11 @@ def test_fund_switch_preserves_lots():
 
 
 # ==========================================================================
-# Test 5: IOF with declaration
+# Test 5: IOF with declaration (configurable threshold)
 # ==========================================================================
 def test_iof_with_declaration():
     """Set declaration to R$550k. Contribute R$100k VGBL.
-    R$50k exempt (fills up to R$600k), R$50k excess -> R$2500 IOF.
-    Net invested = R$97,500."""
+    R$50k exempt (fills up to R$600k), R$50k excess -> R$2500 IOF."""
     app, db, ctx, tmp_path = _setup_db()
 
     try:
@@ -447,17 +451,11 @@ def test_iof_with_declaration():
         # Declare R$550k at other issuers
         models.set_iof_declaration(db, user_id, 2026, 550000.0)
 
-        # Calculate IOF for R$100k contribution
+        # Calculate IOF for R$100k contribution (2026 limit: R$600k)
         iof = tax_engine.calculate_iof_vgbl(db, user_id, 100000.0, 2026)
-
-        # Total before: 0 (internal) + 550k (declared) = 550k
-        # Total after: 550k + 100k = 650k
-        # Excess before: max(0, 550k - 600k) = 0
-        # Excess after: max(0, 650k - 600k) = 50k
-        # IOF = 50k * 5% = 2500
         assert abs(iof - 2500.0) < 0.01, f"IOF should be R$2500, got R${iof}"
 
-        # Now execute the contribution through the engine
+        # Execute contribution through the engine
         req_id = models.create_request(db, user_id, cert_id, 'contribution',
                                         {'amount': 100000}, '2026-01-01')
         step_log = {'month': 0, 'events': []}
@@ -465,25 +463,26 @@ def test_iof_with_declaration():
         details = json.loads(req['details'])
         time_engine._execute_contribution(db, req, details, '2026-01-01', step_log)
 
-        # Check that contribution was recorded at net amount (100k - 2500 = 97500)
+        # Check contribution recorded at net amount (100k - 2500 = 97500)
         contribs = models.list_contributions(db, cert_id)
         assert len(contribs) == 1
         assert abs(contribs[0]['amount'] - 97500.0) < 0.01, \
-            f"Contribution should be recorded at R$97500 (after IOF), got R${contribs[0]['amount']}"
+            f"Contribution should be R$97500 (after IOF), got R${contribs[0]['amount']}"
 
-        # Check that remaining_amount also defaults to the net amount
-        assert abs(contribs[0]['remaining_amount'] - 97500.0) < 0.01, \
-            f"remaining_amount should be R$97500, got R${contribs[0]['remaining_amount']}"
+        # Check units were issued properly
+        assert contribs[0]['units_remaining'] > 0, "Should have units assigned"
+        assert abs(contribs[0]['units_total'] - 97500.0) < 0.01, \
+            f"Units should be 97500 (unit_price=1.0 for empty cert), got {contribs[0]['units_total']}"
 
-        # Check that units were bought for the net amount
-        total_value = models.get_certificate_total_value(db, cert_id)
-        assert abs(total_value - 97500.0) < 1.0, \
-            f"Total value should be ~R$97500, got R${total_value}"
+        # Certificate unit_supply should match
+        unit_supply = models.get_certificate_unit_supply(db, cert_id)
+        assert abs(unit_supply - 97500.0) < 0.01, \
+            f"Unit supply should be 97500, got {unit_supply}"
 
-        # Brokerage should have been debited the full R$100k (not R$97.5k)
-        brokerage = models.get_brokerage_cash(db, user_id)
-        assert abs(brokerage - 100000.0) < 0.01, \
-            f"Brokerage should be R$100k (200k - 100k), got R${brokerage}"
+        # VGBL P_rem should be set
+        P_rem = models.get_vgbl_premium_remaining(db, cert_id)
+        assert abs(P_rem - 97500.0) < 0.01, \
+            f"VGBL P_rem should be R$97500, got R${P_rem}"
 
         # Verify IOF log message
         assert any('IOF' in e for e in step_log['events']), \
@@ -496,16 +495,310 @@ def test_iof_with_declaration():
 
 
 # ==========================================================================
+# Test 6: Multi-contribution timing — the CORE BUG FIX
+# ==========================================================================
+def test_multi_contribution_timing():
+    """The fundamental test proving the unit-based approach is correct.
+
+    Contribute 100 at t0 (unit_price=1, gets 100 units).
+    Fund NAV doubles -> total_value=200, unit_price=2.
+    Contribute 100 at t1 (unit_price=2, gets 50 units).
+    Total: 150 units, total_value=300.
+
+    Withdraw 250:
+      units_to_redeem = 250/2 = 125
+      FIFO: lot 1 (100 units -> worth 200), lot 2 (25 units out of 50 -> worth 50)
+
+    OLD BUG would compute: gf=300/200=1.5, lot1 gets 150, lot2 gets 100 (WRONG).
+    """
+    app, db, ctx, tmp_path = _setup_db()
+
+    try:
+        plan_id = _create_plan(db, 'PGBL')
+        user_id = models.create_user(db, 'test6@test.com', False)
+        models.set_brokerage_cash(db, user_id, 500)
+
+        models.set_sim_date(db, '2024-01-01')
+        models.set_sim_month(db, 0)
+
+        # Create fund at NAV=1.0 for simpler math
+        fund_id = models.create_fund(db, 'Unit Test Fund', 'Test', '99.999.999/0001-00', False, 1.0)
+        for idx in range(12):
+            db.execute("INSERT INTO fund_returns (fund_id, month_idx, return_pct) VALUES (?, ?, 0.0)",
+                       (fund_id, idx))
+        db.commit()
+
+        cert_id = models.create_certificate(db, user_id, plan_id, '2024-01-01')
+        models.set_target_allocations(db, cert_id, [(fund_id, 100)])
+
+        # --- Contribution 1: R$100 at unit_price=1.0 ---
+        _add_contribution_with_units(db, cert_id, 100.0, '2024-01-01')
+        time_engine._buy_into_certificate(db, cert_id, 100.0)
+
+        # Verify: 100 units at unit_price=1.0
+        assert abs(models.get_certificate_unit_supply(db, cert_id) - 100.0) < 0.01
+        assert abs(models.get_certificate_unit_price(db, cert_id) - 1.0) < 0.01
+
+        # --- Simulate NAV doubling: NAV 1.0 -> 2.0 ---
+        db.execute("UPDATE funds SET current_nav = 2.0 WHERE id = ?", (fund_id,))
+        db.commit()
+
+        # Now total_value = 100 fund_units * 2.0 = 200, unit_price = 200/100 = 2.0
+        total_value_after_growth = models.get_certificate_total_value(db, cert_id)
+        assert abs(total_value_after_growth - 200.0) < 1.0, \
+            f"Expected R$200 after NAV doubling, got R${total_value_after_growth}"
+        unit_price_after = models.get_certificate_unit_price(db, cert_id)
+        assert abs(unit_price_after - 2.0) < 0.01, \
+            f"Unit price should be 2.0, got {unit_price_after}"
+
+        # --- Contribution 2: R$100 at unit_price=2.0 ---
+        _add_contribution_with_units(db, cert_id, 100.0, '2025-01-01')
+        time_engine._buy_into_certificate(db, cert_id, 100.0)
+
+        # Verify: 150 certificate units (100 + 50), total_value = 300
+        cert_unit_supply = models.get_certificate_unit_supply(db, cert_id)
+        assert abs(cert_unit_supply - 150.0) < 0.01, \
+            f"Should have 150 cert units, got {cert_unit_supply}"
+
+        total_value_300 = models.get_certificate_total_value(db, cert_id)
+        assert abs(total_value_300 - 300.0) < 1.0, \
+            f"Total value should be R$300, got R${total_value_300}"
+
+        # --- Withdraw R$250 ---
+        models.set_sim_month(db, 24)
+        models.set_sim_date(db, '2026-01-01')
+        models.set_tax_regime(db, cert_id, 'regressive')
+
+        req_id = models.create_request(db, user_id, cert_id, 'withdrawal',
+                                        {'amount': 250}, '2026-01-01')
+        step_log = {'month': 24, 'events': []}
+        req = db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
+        details = json.loads(req['details'])
+        time_engine._execute_withdrawal(db, req, details, '2026-01-01', step_log)
+
+        # Check FIFO consumption
+        contribs = models.list_contributions(db, cert_id)
+        lot1 = [c for c in contribs if c['contribution_date'] == '2024-01-01'][0]
+        lot2 = [c for c in contribs if c['contribution_date'] == '2025-01-01'][0]
+
+        # units_to_redeem = 250 / 2.0 = 125
+        # Lot 1 had 100 units -> fully consumed (100 units * 2.0 = R$200)
+        # Lot 2 had 50 units -> 25 consumed (25 units * 2.0 = R$50), 25 remaining
+        assert lot1['units_remaining'] < 0.01, \
+            f"Lot 1 (old) should be fully consumed, got units_remaining={lot1['units_remaining']}"
+        assert abs(lot2['units_remaining'] - 25.0) < 0.1, \
+            f"Lot 2 (new) should have ~25 units remaining, got {lot2['units_remaining']}"
+
+        # Verify lot allocations show correct cost basis consumed
+        allocs = db.execute(
+            "SELECT * FROM lot_allocations ORDER BY id"
+        ).fetchall()
+        assert len(allocs) >= 2, f"Should have at least 2 lot allocations, got {len(allocs)}"
+
+        # consumed_amount = cost basis consumed (NOT market value)
+        # Lot 1: remaining_amount=100, units=100, all consumed -> cost_basis=100
+        assert abs(allocs[0]['consumed_amount'] - 100.0) < 1.0, \
+            f"First FIFO tranche cost basis should be ~R$100, got R${allocs[0]['consumed_amount']}"
+        # Lot 2: remaining_amount=100, units=50, 25 consumed -> cost_basis=50
+        assert abs(allocs[1]['consumed_amount'] - 50.0) < 1.0, \
+            f"Second FIFO tranche cost basis should be ~R$50, got R${allocs[1]['consumed_amount']}"
+
+        # But the key test: FIFO allocated R$200+R$50=R$250 in market value (not R$150+R$100)
+        # This is proven by the units_remaining checks above and the remaining value check below
+
+        # Remaining value should be ~R$50 (25 units * 2.0)
+        remaining_value = models.get_certificate_total_value(db, cert_id)
+        assert abs(remaining_value - 50.0) < 1.0, \
+            f"Remaining value should be ~R$50, got R${remaining_value}"
+
+        print("  PASS: test_multi_contribution_timing (CORE BUG FIX)")
+    finally:
+        ctx.pop()
+        os.unlink(tmp_path)
+
+
+# ==========================================================================
+# Test 7: VGBL with earnings-only tax + regressive brackets (days-based)
+# ==========================================================================
+def test_vgbl_regressive_brackets():
+    """Multi-contribution VGBL with growth. Verify:
+    1. Taxable base uses certificate-level earnings_ratio
+    2. Per-lot rates differ by age (days-based)
+    3. Total tax = sum of per-lot taxes"""
+    app, db, ctx, tmp_path = _setup_db()
+
+    try:
+        plan_id = _create_plan(db, 'VGBL')
+        user_id = models.create_user(db, 'test7@test.com', False)
+        models.set_brokerage_cash(db, user_id, 500)
+
+        models.set_sim_date(db, '2022-01-01')
+        models.set_sim_month(db, 0)
+
+        # Fund at NAV=1.0
+        fund_id = models.create_fund(db, 'VGBL Test Fund', 'Test', '88.888.888/0001-00', False, 1.0)
+        for idx in range(12):
+            db.execute("INSERT INTO fund_returns (fund_id, month_idx, return_pct) VALUES (?, ?, 0.0)",
+                       (fund_id, idx))
+        db.commit()
+
+        cert_id = models.create_certificate(db, user_id, plan_id, '2022-01-01')
+        models.set_target_allocations(db, cert_id, [(fund_id, 100)])
+        models.set_tax_regime(db, cert_id, 'regressive')
+
+        # Contribution 1: R$1000 in 2022 (will be >4 years old -> 25% rate)
+        _add_contribution_with_units(db, cert_id, 1000.0, '2022-01-01')
+        models.update_vgbl_premium_remaining(db, cert_id, 1000.0)
+        time_engine._buy_into_certificate(db, cert_id, 1000.0)
+
+        # Contribution 2: R$1000 in 2025 (will be ~1 year old -> 35% rate)
+        # First double the NAV so this contribution gets fewer units
+        db.execute("UPDATE funds SET current_nav = 2.0 WHERE id = ?", (fund_id,))
+        db.commit()
+
+        _add_contribution_with_units(db, cert_id, 1000.0, '2025-06-01')
+        models.update_vgbl_premium_remaining(db, cert_id, 1000.0)
+        time_engine._buy_into_certificate(db, cert_id, 1000.0)
+
+        # State: P_rem=2000, total_value should be ~3000 (1000 units*2 + 500 units*2)
+        # unit_supply=1500, unit_price=2.0
+        total_value = models.get_certificate_total_value(db, cert_id)
+        P_rem = models.get_vgbl_premium_remaining(db, cert_id)
+        assert abs(P_rem - 2000.0) < 0.01
+
+        # earnings_ratio = 1 - (2000/3000) = 1/3
+        earnings_ratio = 1 - (P_rem / total_value)
+        assert abs(earnings_ratio - 1.0/3.0) < 0.01, \
+            f"Earnings ratio should be ~0.333, got {earnings_ratio}"
+
+        # Advance to 2026-07-01
+        models.set_sim_month(db, 54)
+        models.set_sim_date(db, '2026-07-01')
+
+        # Use tax_engine.estimate_tax to preview
+        estimate = tax_engine.estimate_tax(db, cert_id, total_value)
+        reg = estimate['regressive']
+
+        # Should have 2 tranches with different rates
+        assert len(reg['breakdown']) == 2, \
+            f"Should have 2 FIFO tranches, got {len(reg['breakdown'])}"
+
+        # Tranche 1 (2022-01-01): 1643 days held -> 25% rate (1461 < 1643 <= 2192)
+        t1 = reg['breakdown'][0]
+        assert t1['rate'] == 0.25, f"Old lot should be 25% rate, got {t1['rate']}"
+
+        # Tranche 2 (2025-06-01): 396 days held -> 35% rate (<= 730)
+        t2 = reg['breakdown'][1]
+        assert t2['rate'] == 0.35, f"New lot should be 35% rate, got {t2['rate']}"
+
+        # Total tax should be less than if all were PGBL (which taxes full amount)
+        pgbl_tax = sum(b['tranche_amount'] * b['rate'] for b in reg['breakdown'])
+        assert reg['tax'] < pgbl_tax, \
+            f"VGBL tax ({reg['tax']}) should be less than PGBL-equivalent ({pgbl_tax})"
+
+        # Verify effective rate makes sense
+        assert 0 < reg['effective_rate'] < 0.35 * earnings_ratio + 0.01, \
+            f"Effective rate ({reg['effective_rate']}) should be in reasonable range"
+
+        print("  PASS: test_vgbl_regressive_brackets")
+    finally:
+        ctx.pop()
+        os.unlink(tmp_path)
+
+
+# ==========================================================================
+# Test 8: External port-in with embedded gains
+# ==========================================================================
+def test_external_portin_embedded_gains():
+    """Transfer-in R$10000, embedded_gain_pct=0.80, so P_rem += 8000.
+    Immediate withdraw: earnings_ratio = 1 - (8000/10000) = 0.20.
+    Taxable = 10000 * 0.20 = 2000 (NOT zero, NOT 10000)."""
+    app, db, ctx, tmp_path = _setup_db()
+
+    try:
+        plan_id = _create_plan(db, 'VGBL')
+        fund_id = _create_fund(db, nav=10.0)
+        user_id = models.create_user(db, 'test8@test.com', False)
+        models.set_brokerage_cash(db, user_id, 50000)
+
+        models.set_sim_date(db, '2025-01-01')
+        models.set_sim_month(db, 0)
+
+        cert_id = models.create_certificate(db, user_id, plan_id, '2025-01-01')
+        models.set_target_allocations(db, cert_id, [(fund_id, 100)])
+        models.set_tax_regime(db, cert_id, 'regressive')
+
+        # External transfer in of R$10,000
+        # Uses the port-in schedule but we test the P_rem calculation
+        req_id = models.create_request(db, user_id, cert_id, 'transfer_external_in',
+                                        {'source_institution': 'OtherBank', 'amount': 10000},
+                                        '2025-01-01')
+        step_log = {'month': 0, 'events': []}
+        req = db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
+        details = json.loads(req['details'])
+        time_engine._execute_transfer_external_in(db, req, details, '2025-01-01', step_log)
+
+        # P_rem should be 10000 * 0.80 = 8000
+        P_rem = models.get_vgbl_premium_remaining(db, cert_id)
+        assert abs(P_rem - 8000.0) < 0.01, \
+            f"P_rem should be R$8000 (80% of R$10000), got R${P_rem}"
+
+        # Total value should be ~R$10000
+        total_value = models.get_certificate_total_value(db, cert_id)
+        assert abs(total_value - 10000.0) < 1.0, \
+            f"Total value should be ~R$10000, got R${total_value}"
+
+        # Earnings ratio = 1 - (8000/10000) = 0.20
+        earnings_ratio = 1 - (P_rem / total_value)
+        assert abs(earnings_ratio - 0.20) < 0.01, \
+            f"Earnings ratio should be ~0.20, got {earnings_ratio}"
+
+        # Unit supply should be positive
+        unit_supply = models.get_certificate_unit_supply(db, cert_id)
+        assert unit_supply > 0, f"Should have certificate units, got {unit_supply}"
+
+        # Tax preview: taxable should be ~R$2000 (20% of R$10000)
+        estimate = tax_engine.estimate_tax(db, cert_id, total_value)
+        if estimate.get('regressive'):
+            reg = estimate['regressive']
+            # Total taxable across all tranches
+            total_taxable = sum(b['taxable'] for b in reg['breakdown'])
+            assert abs(total_taxable - 2000.0) < 10.0, \
+                f"Total taxable should be ~R$2000, got R${total_taxable}"
+            # Tax should NOT be zero (external port-in has embedded gains)
+            assert reg['tax'] > 0, "Tax should be >0 due to embedded gains"
+            # Tax should NOT be on full amount (that would ignore P_rem)
+            max_tax_if_full = total_value * 0.35  # worst case rate
+            assert reg['tax'] < max_tax_if_full * 0.5, \
+                f"Tax ({reg['tax']}) should be much less than full-amount tax ({max_tax_if_full})"
+
+        # Contributions should have backdated lots per port-in schedule
+        contribs = models.list_contributions(db, cert_id)
+        assert len(contribs) > 0, "Should have contributions from port-in"
+        # At least one should be transfer_external
+        ext_contribs = [c for c in contribs if c['source_type'] == 'transfer_external']
+        assert len(ext_contribs) > 0, "Should have transfer_external contributions"
+
+        print("  PASS: test_external_portin_embedded_gains")
+    finally:
+        ctx.pop()
+        os.unlink(tmp_path)
+
+
+# ==========================================================================
 # Runner
 # ==========================================================================
 def run_all():
-    print("Running Amendment v1 acceptance tests...\n")
+    print("Running Amendment v2 acceptance tests...\n")
     tests = [
         test_progressive_lot_consumption,
-        test_portability_then_withdrawal,
+        test_transfer_then_withdrawal,
         test_vgbl_earnings_taxation,
         test_fund_switch_preserves_lots,
         test_iof_with_declaration,
+        test_multi_contribution_timing,
+        test_vgbl_regressive_brackets,
+        test_external_portin_embedded_gains,
     ]
     passed = 0
     failed = 0

@@ -22,7 +22,7 @@
 
     {% if cert.plan_type == 'VGBL' %}
     <article style="border-left: 4px solid #42A5F5; padding-left: 1em;">
-        <strong>IOF Note:</strong> VGBL contributions exceeding R$600,000/year (across all issuers) are subject to 5% IOF (Decree 12.499/2025). The IOF is deducted from the contribution amount before investing.
+        <strong>IOF Note:</strong> VGBL contributions exceeding the annual threshold (across all issuers) are subject to IOF (Decree 12.499/2025). The IOF is deducted from the contribution amount before investing. Thresholds and rates are configurable per year.
         <br><small><a href="{{ url_for('portal.iof_declaration') }}">Declare contributions at other issuers</a></small>
     </article>
     {% endif %}

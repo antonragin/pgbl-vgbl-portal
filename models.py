@@ -285,13 +285,16 @@ def get_target_allocations(db, cert_id):
 # ---------------------------------------------------------------------------
 
 def add_contribution(db, cert_id, amount, contribution_date, source_type='contribution',
-                     remaining_amount=None):
+                     remaining_amount=None, units_total=0.0, units_remaining=0.0,
+                     issue_unit_price=0.0):
     if remaining_amount is None:
         remaining_amount = amount
     cur = db.execute(
         "INSERT INTO contributions (certificate_id, amount, remaining_amount, "
-        "contribution_date, source_type) VALUES (?, ?, ?, ?, ?)",
-        (cert_id, amount, remaining_amount, contribution_date, source_type)
+        "contribution_date, source_type, units_total, units_remaining, issue_unit_price) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (cert_id, amount, remaining_amount, contribution_date, source_type,
+         units_total, units_remaining, issue_unit_price)
     )
     db.commit()
     return cur.lastrowid
@@ -322,67 +325,84 @@ def total_remaining_contributions(db, cert_id):
     return row['total']
 
 
-def consume_lots_fifo(db, cert_id, cost_basis_to_consume):
-    """Consume oldest lots first by reducing remaining_amount.
-    Returns list of dicts: [{contribution_id, consumed_amount, months_held, contribution_date, remaining_after}]."""
+def consume_lots_fifo(db, cert_id, units_to_consume):
+    """Consume oldest lots first by reducing units_remaining.
+    Also reduces remaining_amount proportionally.
+    Returns list of dicts with units_consumed and consumed_amount per lot."""
     contributions = db.execute(
-        "SELECT * FROM contributions WHERE certificate_id = ? AND remaining_amount > 1e-9 "
+        "SELECT * FROM contributions WHERE certificate_id = ? AND units_remaining > 1e-9 "
         "ORDER BY contribution_date, id",
         (cert_id,)
     ).fetchall()
 
     consumed = []
-    remaining_to_consume = cost_basis_to_consume
+    remaining_units = units_to_consume
 
     for c in contributions:
-        if remaining_to_consume <= 1e-9:
+        if remaining_units <= 1e-9:
             break
 
-        available = c['remaining_amount']
-        take = min(available, remaining_to_consume)
-        new_remaining = available - take
+        available_units = c['units_remaining']
+        take_units = min(available_units, remaining_units)
+        new_units_remaining = available_units - take_units
+
+        # Reduce remaining_amount proportionally
+        if c['units_total'] > 1e-9:
+            fraction_consumed = take_units / c['units_total']
+        else:
+            fraction_consumed = take_units / available_units if available_units > 1e-9 else 1.0
+        consumed_amount = c['remaining_amount'] * (take_units / available_units) if available_units > 1e-9 else c['remaining_amount']
+        new_remaining_amount = c['remaining_amount'] - consumed_amount
 
         db.execute(
-            "UPDATE contributions SET remaining_amount = ? WHERE id = ?",
-            (new_remaining, c['id'])
+            "UPDATE contributions SET units_remaining = ?, remaining_amount = ? WHERE id = ?",
+            (new_units_remaining, max(0, new_remaining_amount), c['id'])
         )
 
         consumed.append({
             'contribution_id': c['id'],
-            'consumed_amount': take,
+            'units_consumed': take_units,
+            'consumed_amount': consumed_amount,
             'contribution_date': c['contribution_date'],
             'original_amount': c['amount'],
-            'remaining_after': new_remaining,
+            'units_remaining_after': new_units_remaining,
+            'remaining_after': max(0, new_remaining_amount),
             'source_type': c['source_type'],
         })
 
-        remaining_to_consume -= take
+        remaining_units -= take_units
 
     db.commit()
     return consumed
 
 
 def record_lot_allocations(db, outflow_type, outflow_id, consumed_lots,
-                           sim_month, tax_rate_fn=None, taxable_base_fn=None,
+                           current_date_str, tax_rate_fn=None, taxable_base_fn=None,
                            tax_amount_fn=None):
     """Insert rows into lot_allocations for audit trail.
     consumed_lots: list from consume_lots_fifo.
-    tax_rate_fn, taxable_base_fn, tax_amount_fn: optional callables (lot, months_held) -> float."""
-    from tax_engine import _date_to_sim_month
+    current_date_str: YYYY-MM-DD for computing days_held.
+    tax_rate_fn, taxable_base_fn, tax_amount_fn: optional callables (lot, days_held) -> float."""
+    from datetime import datetime
+
+    current_dt = datetime.strptime(current_date_str, '%Y-%m-%d')
 
     for lot in consumed_lots:
-        contrib_month = _date_to_sim_month(lot['contribution_date'])
-        months_held = max(0, sim_month - contrib_month)
-        tax_rate = tax_rate_fn(lot, months_held) if tax_rate_fn else 0.0
-        taxable_base = taxable_base_fn(lot, months_held) if taxable_base_fn else 0.0
-        tax_amount = tax_amount_fn(lot, months_held) if tax_amount_fn else 0.0
+        contrib_dt = datetime.strptime(lot['contribution_date'], '%Y-%m-%d')
+        days_held = max(0, (current_dt - contrib_dt).days)
+        months_held = days_held // 30  # approximate for backward compat
+
+        tax_rate = tax_rate_fn(lot, days_held) if tax_rate_fn else 0.0
+        taxable_base = taxable_base_fn(lot, days_held) if taxable_base_fn else 0.0
+        tax_amount = tax_amount_fn(lot, days_held) if tax_amount_fn else 0.0
 
         db.execute(
             "INSERT INTO lot_allocations (outflow_type, outflow_id, contribution_id, "
-            "consumed_amount, months_held, tax_rate, taxable_base, tax_amount) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "consumed_amount, months_held, days_held, tax_rate, taxable_base, tax_amount) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (outflow_type, outflow_id, lot['contribution_id'],
-             lot['consumed_amount'], months_held, tax_rate, taxable_base, tax_amount)
+             lot['consumed_amount'], months_held, days_held,
+             tax_rate, taxable_base, tax_amount)
         )
     db.commit()
 
@@ -581,5 +601,107 @@ def set_external_portin_schedule(db, schedule):
     db.execute(
         "INSERT OR REPLACE INTO sim_state (key, value) VALUES ('external_portin_schedule', ?)",
         (json.dumps(schedule),)
+    )
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Certificate Units
+# ---------------------------------------------------------------------------
+
+def get_certificate_unit_price(db, cert_id):
+    """Compute unit_price = total_value / unit_supply. Returns 1.0 if no units yet."""
+    cert = db.execute("SELECT unit_supply FROM certificates WHERE id = ?", (cert_id,)).fetchone()
+    if not cert or cert['unit_supply'] <= 1e-9:
+        return 1.0
+    total_value = get_certificate_total_value(db, cert_id)
+    if total_value <= 0:
+        return 1.0
+    return total_value / cert['unit_supply']
+
+
+def update_certificate_units(db, cert_id, delta):
+    """Add (or subtract) from certificate's unit_supply."""
+    db.execute(
+        "UPDATE certificates SET unit_supply = unit_supply + ? WHERE id = ?",
+        (delta, cert_id)
+    )
+    db.commit()
+
+
+def get_certificate_unit_supply(db, cert_id):
+    """Read unit_supply from certificates."""
+    row = db.execute("SELECT unit_supply FROM certificates WHERE id = ?", (cert_id,)).fetchone()
+    return row['unit_supply'] if row else 0.0
+
+
+def get_vgbl_premium_remaining(db, cert_id):
+    """Read vgbl_premium_remaining from certificates."""
+    row = db.execute("SELECT vgbl_premium_remaining FROM certificates WHERE id = ?", (cert_id,)).fetchone()
+    return row['vgbl_premium_remaining'] if row else 0.0
+
+
+def update_vgbl_premium_remaining(db, cert_id, delta):
+    """Add (or subtract) from certificate's vgbl_premium_remaining."""
+    db.execute(
+        "UPDATE certificates SET vgbl_premium_remaining = max(0, vgbl_premium_remaining + ?) WHERE id = ?",
+        (delta, cert_id)
+    )
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
+# IOF Config (configurable thresholds/rates)
+# ---------------------------------------------------------------------------
+
+def get_iof_config(db):
+    """Get IOF configuration from sim_state. Returns list of threshold rules."""
+    row = db.execute("SELECT value FROM sim_state WHERE key = 'iof_config'").fetchone()
+    if row:
+        return json.loads(row['value'])
+    return {
+        'thresholds': [
+            {'year_from': 2025, 'year_to': 2025, 'limit': 300000, 'rate': 0.05},
+            {'year_from': 2026, 'year_to': 9999, 'limit': 600000, 'rate': 0.05},
+        ]
+    }
+
+
+def set_iof_config(db, config):
+    """Set IOF configuration."""
+    db.execute(
+        "INSERT OR REPLACE INTO sim_state (key, value) VALUES ('iof_config', ?)",
+        (json.dumps(config),)
+    )
+    db.commit()
+
+
+def get_iof_limit_for_year(db, year):
+    """Get the IOF exemption limit and rate for a given year."""
+    config = get_iof_config(db)
+    for rule in config.get('thresholds', []):
+        if rule['year_from'] <= year <= rule['year_to']:
+            return rule['limit'], rule['rate']
+    return 600000, 0.05  # fallback default
+
+
+# ---------------------------------------------------------------------------
+# External Port-in Embedded Gain
+# ---------------------------------------------------------------------------
+
+def get_external_portin_gain_pct(db):
+    """Get the assumed premium percentage for external port-in.
+    E.g., 0.80 means 80% of transferred value is premium basis (20% embedded gain)."""
+    row = db.execute(
+        "SELECT value FROM sim_state WHERE key = 'external_portin_embedded_gain_pct'"
+    ).fetchone()
+    return float(row['value']) if row else 0.80
+
+
+def set_external_portin_gain_pct(db, pct):
+    """Set the external port-in embedded gain percentage."""
+    db.execute(
+        "INSERT OR REPLACE INTO sim_state (key, value) VALUES ('external_portin_embedded_gain_pct', ?)",
+        (str(pct),)
     )
     db.commit()

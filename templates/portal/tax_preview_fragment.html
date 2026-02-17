@@ -3,7 +3,7 @@
 {% else %}
 <article>
     <header>Tax Estimate for R${{ "%.2f"|format(result.withdrawal_amount) }}</header>
-    <p>{{ result.plan_type }} | Value: R${{ "%.2f"|format(result.total_value) }} | Cost Basis: R${{ "%.2f"|format(result.total_remaining) }}</p>
+    <p>{{ result.plan_type }} | Value: R${{ "%.2f"|format(result.total_value) }} | Unit Price: R${{ "%.6f"|format(result.unit_price) }}</p>
 
     {% if result.get('regressive') and result.get('progressive') %}
     <div class="grid">
@@ -20,19 +20,20 @@
             <details>
                 <summary>FIFO Breakdown ({{ r.breakdown|length }} tranches)</summary>
                 <table style="font-size:0.8em">
-                    <thead><tr><th>Value</th><th>Cost Basis</th><th>Age</th><th>Rate</th><th>Tax</th></tr></thead>
+                    <thead><tr><th>Value</th><th>Units</th><th>Age</th><th>Rate</th><th>Taxable</th><th>Tax</th></tr></thead>
                     <tbody>
                     {% for b in r.breakdown[:10] %}
                     <tr>
                         <td>R${{ "%.2f"|format(b.tranche_amount) }}</td>
-                        <td>R${{ "%.2f"|format(b.cost_basis) }}</td>
-                        <td>{{ b.months_held }}m</td>
+                        <td>{{ "%.4f"|format(b.units_consumed) }}</td>
+                        <td>{{ b.days_held }}d</td>
                         <td>{{ "%.0f"|format(b.rate * 100) }}%</td>
+                        <td>R${{ "%.2f"|format(b.taxable) }}</td>
                         <td>R${{ "%.2f"|format(b.tax) }}</td>
                     </tr>
                     {% endfor %}
                     {% if r.breakdown|length > 10 %}
-                    <tr><td colspan="5"><em>+{{ r.breakdown|length - 10 }} more</em></td></tr>
+                    <tr><td colspan="6"><em>+{{ r.breakdown|length - 10 }} more</em></td></tr>
                     {% endif %}
                     </tbody>
                 </table>
@@ -41,11 +42,14 @@
         </div>
         <div>
             {% set p = result.progressive %}
-            <h4>Progressive Regime <small>(estimated)</small></h4>
+            <h4>Progressive Regime &mdash; IRRF antecipa&ccedil;&atilde;o <small>(estimated)</small></h4>
             <p>Withheld (15%): <strong style="color:#f44336">R${{ "%.2f"|format(p.tax_withheld_15pct) }}</strong></p>
             <p>Net received: <strong style="color:#4CAF50">R${{ "%.2f"|format(p.net) }}</strong></p>
             <p>Taxable base: R${{ "%.2f"|format(p.taxable_base) }}</p>
-            <p><small>Note: 15% withholding is an advance payment. Final tax is reconciled in the annual IRPF return.</small></p>
+            {% if p.get('estimated_final_tax') is not none %}
+            <p><small>Estimated final tax (monthly brackets): R${{ "%.2f"|format(p.estimated_final_tax) }}</small></p>
+            {% endif %}
+            <p><small>{{ p.get('note', '15% withholding is an advance payment. Final tax depends on annual income.') }}</small></p>
             {% if result.get('projected_brokerage_progressive') is not none %}
             <p><small>Projected brokerage: R${{ "%.2f"|format(result.projected_brokerage_progressive) }}</small></p>
             {% endif %}
@@ -60,13 +64,13 @@
     <details>
         <summary>FIFO Breakdown ({{ r.breakdown|length }} tranches)</summary>
         <table>
-            <thead><tr><th>Value</th><th>Cost Basis</th><th>Age</th><th>Rate</th><th>Taxable</th><th>Tax</th></tr></thead>
+            <thead><tr><th>Value</th><th>Units</th><th>Age</th><th>Rate</th><th>Taxable</th><th>Tax</th></tr></thead>
             <tbody>
             {% for b in r.breakdown[:10] %}
             <tr>
                 <td>R${{ "%.2f"|format(b.tranche_amount) }}</td>
-                <td>R${{ "%.2f"|format(b.cost_basis) }}</td>
-                <td>{{ b.months_held }} months</td>
+                <td>{{ "%.4f"|format(b.units_consumed) }}</td>
+                <td>{{ b.days_held }}d</td>
                 <td>{{ "%.0f"|format(b.rate * 100) }}%</td>
                 <td>R${{ "%.2f"|format(b.taxable) }}</td>
                 <td>R${{ "%.2f"|format(b.tax) }}</td>
@@ -83,9 +87,12 @@
 
     {% if result.get('progressive') %}
     {% set p = result.progressive %}
-    <h4>Progressive Regime <small>(estimated)</small></h4>
+    <h4>Progressive Regime &mdash; IRRF antecipa&ccedil;&atilde;o <small>(estimated)</small></h4>
     <p>Gross: R${{ "%.2f"|format(p.gross) }} | Taxable base: R${{ "%.2f"|format(p.taxable_base) }} | Withheld (15%): <strong style="color:#f44336">R${{ "%.2f"|format(p.tax_withheld_15pct) }}</strong> | Net: <strong style="color:#4CAF50">R${{ "%.2f"|format(p.net) }}</strong></p>
-    <p><small>Note: 15% withholding is an advance payment. Final tax is reconciled in the annual IRPF return.</small></p>
+    {% if p.get('estimated_final_tax') is not none %}
+    <p><small>Estimated final tax (monthly brackets): R${{ "%.2f"|format(p.estimated_final_tax) }}</small></p>
+    {% endif %}
+    <p><small>{{ p.get('note', '15% withholding is an advance payment. Final tax depends on annual income.') }}</small></p>
     {% endif %}
     {% endif %}
 

@@ -11,7 +11,7 @@
 
 <article style="border-left: 4px solid #42A5F5; padding-left: 1em;">
     <strong>IOF Rule (Decree 12.499/2025):</strong>
-    <p>VGBL contributions exceeding R$600,000/year (across all issuers) are subject to 5% IOF. The IOF is deducted from the contribution amount before investing.</p>
+    <p>VGBL contributions exceeding R${{ "%.0f"|format(iof_limit) }}/year (across all issuers) are subject to {{ "%.0f"|format(iof_rate * 100) }}% IOF. The IOF is deducted from the contribution amount before investing.</p>
     <p>If you make VGBL contributions at other institutions, declare them here so the system can correctly calculate IOF on new contributions.</p>
 </article>
 
@@ -25,8 +25,8 @@
         <div>
             <p>Total VGBL contributions: <strong>R${{ "%.2f"|format(total) }}</strong></p>
             <p>Remaining exempt: <strong style="color:{{ '#4CAF50' if remaining_exempt > 0 else '#f44336' }}">R${{ "%.2f"|format(remaining_exempt) }}</strong></p>
-            {% if total > 600000 %}
-            <p style="color:#f44336"><strong>Exceeded R$600,000 limit &mdash; 5% IOF applies to new VGBL contributions.</strong></p>
+            {% if total > iof_limit %}
+            <p style="color:#f44336"><strong>Exceeded R${{ "%.0f"|format(iof_limit) }} limit &mdash; {{ "%.0f"|format(iof_rate * 100) }}% IOF applies to new VGBL contributions.</strong></p>
             {% endif %}
         </div>
     </div>

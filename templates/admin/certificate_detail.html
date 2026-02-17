@@ -18,6 +18,13 @@
     Total Contributions: R${{ "%.2f"|format(total_contribs) }} |
     Cost Basis (Remaining): R${{ "%.2f"|format(total_remaining) }}
 </p>
+<p style="opacity:0.8">
+    Unit Supply: <strong>{{ "%.6f"|format(unit_supply) }}</strong> |
+    Unit Price: <strong>R${{ "%.6f"|format(unit_price) }}</strong>
+    {% if cert.plan_type == 'VGBL' %} |
+    P<sub>rem</sub>: <strong>R${{ "%.2f"|format(P_rem) }}</strong>
+    {% endif %}
+</p>
 
 <h2>Holdings</h2>
 {% if holdings %}
@@ -89,14 +96,16 @@
 <h2>Contributions (Tax Lots)</h2>
 {% if contributions %}
 <table>
-    <thead><tr><th>ID</th><th>Date</th><th>Original</th><th>Remaining</th><th>Source</th></tr></thead>
+    <thead><tr><th>ID</th><th>Date</th><th>Original</th><th>Remaining</th><th>Units Rem.</th><th>Unit Price@Issue</th><th>Source</th></tr></thead>
     <tbody>
     {% for c in contributions %}
-    <tr{% if c.remaining_amount <= 0 %} style="opacity:0.4"{% endif %}>
+    <tr{% if c.units_remaining <= 0.000001 %} style="opacity:0.4"{% endif %}>
         <td>{{ c.id }}</td>
         <td>{{ c.contribution_date }}</td>
         <td>R${{ "%.2f"|format(c.amount) }}</td>
         <td>R${{ "%.2f"|format(c.remaining_amount) }}</td>
+        <td>{{ "%.4f"|format(c.units_remaining) }}</td>
+        <td>R${{ "%.6f"|format(c.issue_unit_price) }}</td>
         <td>{{ c.source_type or 'contribution' }}</td>
     </tr>
     {% endfor %}
@@ -177,7 +186,7 @@
         <td>{{ la.outflow_type }}</td>
         <td>{{ la.contribution_id }}</td>
         <td>R${{ "%.2f"|format(la.consumed_amount) }}</td>
-        <td>{{ la.months_held }}m</td>
+        <td>{{ la.days_held }}d ({{ la.months_held }}m)</td>
         <td>{{ "%.0f"|format(la.tax_rate * 100) }}%</td>
         <td>R${{ "%.2f"|format(la.taxable_base) }}</td>
         <td>R${{ "%.2f"|format(la.tax_amount) }}</td>

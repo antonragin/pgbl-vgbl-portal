@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS certificates (
                     CHECK(phase IN ('accumulation', 'spending')),
     tax_regime      TEXT DEFAULT NULL
                     CHECK(tax_regime IN ('progressive', 'regressive', NULL)),
+    unit_supply             REAL NOT NULL DEFAULT 0.0,
+    vgbl_premium_remaining  REAL NOT NULL DEFAULT 0.0,
     notes           TEXT
 );
 
@@ -60,6 +62,9 @@ CREATE TABLE IF NOT EXISTS contributions (
     contribution_date   TEXT NOT NULL,
     source_type         TEXT NOT NULL DEFAULT 'contribution'
                         CHECK(source_type IN ('contribution', 'transfer_internal', 'transfer_external')),
+    units_total         REAL NOT NULL DEFAULT 0.0,
+    units_remaining     REAL NOT NULL DEFAULT 0.0,
+    issue_unit_price    REAL NOT NULL DEFAULT 0.0,
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -122,7 +127,8 @@ CREATE TABLE IF NOT EXISTS lot_allocations (
     outflow_id      INTEGER NOT NULL,
     contribution_id INTEGER NOT NULL REFERENCES contributions(id),
     consumed_amount REAL NOT NULL,
-    months_held     INTEGER NOT NULL,
+    months_held     INTEGER NOT NULL DEFAULT 0,
+    days_held       INTEGER NOT NULL DEFAULT 0,
     tax_rate        REAL NOT NULL DEFAULT 0.0,
     taxable_base    REAL NOT NULL DEFAULT 0.0,
     tax_amount      REAL NOT NULL DEFAULT 0.0,
@@ -209,8 +215,8 @@ def upgrade_schema(db):
         db.commit()
 
     # --- Certificates: remove cash_balance if present ---
-    cert_cols = [r[1] for r in db.execute("PRAGMA table_info(certificates)").fetchall()]
-    if 'cash_balance' in cert_cols:
+    cert_cols2 = [r[1] for r in db.execute("PRAGMA table_info(certificates)").fetchall()]
+    if 'cash_balance' in cert_cols2:
         db.execute("ALTER TABLE certificates RENAME TO certificates_old")
         db.execute("""
             CREATE TABLE certificates (
@@ -222,6 +228,8 @@ def upgrade_schema(db):
                                 CHECK(phase IN ('accumulation', 'spending')),
                 tax_regime      TEXT DEFAULT NULL
                                 CHECK(tax_regime IN ('progressive', 'regressive', NULL)),
+                unit_supply             REAL NOT NULL DEFAULT 0.0,
+                vgbl_premium_remaining  REAL NOT NULL DEFAULT 0.0,
                 notes           TEXT
             )
         """)
@@ -252,6 +260,33 @@ def upgrade_schema(db):
                 created_at      TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        db.commit()
+
+    # --- Certificates: add unit_supply and vgbl_premium_remaining if missing ---
+    cert_cols = [r[1] for r in db.execute("PRAGMA table_info(certificates)").fetchall()]
+    if 'unit_supply' not in cert_cols:
+        db.execute("ALTER TABLE certificates ADD COLUMN unit_supply REAL NOT NULL DEFAULT 0.0")
+        db.commit()
+    if 'vgbl_premium_remaining' not in cert_cols:
+        db.execute("ALTER TABLE certificates ADD COLUMN vgbl_premium_remaining REAL NOT NULL DEFAULT 0.0")
+        db.commit()
+
+    # --- Contributions: add unit columns if missing ---
+    contrib_cols = [r[1] for r in db.execute("PRAGMA table_info(contributions)").fetchall()]
+    if 'units_total' not in contrib_cols:
+        db.execute("ALTER TABLE contributions ADD COLUMN units_total REAL NOT NULL DEFAULT 0.0")
+        db.commit()
+    if 'units_remaining' not in contrib_cols:
+        db.execute("ALTER TABLE contributions ADD COLUMN units_remaining REAL NOT NULL DEFAULT 0.0")
+        db.commit()
+    if 'issue_unit_price' not in contrib_cols:
+        db.execute("ALTER TABLE contributions ADD COLUMN issue_unit_price REAL NOT NULL DEFAULT 0.0")
+        db.commit()
+
+    # --- lot_allocations: add days_held if missing ---
+    la_cols = [r[1] for r in db.execute("PRAGMA table_info(lot_allocations)").fetchall()]
+    if 'days_held' not in la_cols:
+        db.execute("ALTER TABLE lot_allocations ADD COLUMN days_held INTEGER NOT NULL DEFAULT 0")
         db.commit()
 
     # --- Requests: ensure CHECK constraints include all types ---

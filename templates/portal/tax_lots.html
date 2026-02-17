@@ -22,20 +22,23 @@
             <p>Cost Basis (Remaining): <strong>R${{ "%.2f"|format(total_remaining) }}</strong></p>
         </div>
         <div>
-            <p>Growth Factor: <strong>{{ "%.4f"|format(growth_factor) }}x</strong></p>
+            <p>Unit Price: <strong>R${{ "%.6f"|format(unit_price) }}</strong> | Unit Supply: <strong>{{ "%.4f"|format(unit_supply) }}</strong></p>
             <p>Total Earnings: <strong style="color:#4CAF50">R${{ "%.2f"|format(total_value - total_remaining) }}</strong></p>
+            {% if cert.plan_type == 'VGBL' %}
+            <p>P<sub>rem</sub> (premium remaining): <strong>R${{ "%.2f"|format(P_rem) }}</strong> | Earnings Ratio: <strong>{{ "%.2f"|format((1 - P_rem / total_value) * 100 if total_value > 0 else 0) }}%</strong></p>
+            {% endif %}
         </div>
     </div>
 </article>
 
 <article style="border-left: 4px solid #42A5F5; padding-left: 1em;">
-    <strong>How Tax Lots Work:</strong>
+    <strong>How Tax Lots Work (Certificate Units):</strong>
     <ul>
+        <li><strong>Units</strong>: each contribution buys certificate units at the current unit price. Lot value = units &times; unit_price.</li>
         <li><strong>Original Amount</strong>: what you contributed (or transferred in)</li>
-        <li><strong>Remaining Amount</strong>: cost basis left after partial withdrawals or transfers out (consumed FIFO)</li>
-        <li><strong>Current Value</strong>: estimated market value of this lot = remaining &times; growth factor</li>
-        <li><strong>Earnings</strong>: current value &minus; remaining (for VGBL, only earnings are taxed under regressive regime)</li>
-        <li><strong>Regressive Rate</strong>: based on the age of each lot (FIFO); rate drops over time</li>
+        <li><strong>Current Value</strong>: units_remaining &times; unit_price (captures actual growth per lot)</li>
+        <li><strong>Earnings</strong>: current value &minus; cost basis. For VGBL, uses certificate-level P<sub>rem</sub> earnings ratio.</li>
+        <li><strong>Regressive Rate</strong>: based on the exact age in days of each lot; rate drops over time (FIFO)</li>
         <li>On withdrawal, the <strong>oldest lots are consumed first</strong> (FIFO). Tax is computed per lot.</li>
     </ul>
 </article>
@@ -48,7 +51,7 @@
             <th>Date</th>
             <th>Source</th>
             <th>Original</th>
-            <th>Remaining</th>
+            <th>Units Rem.</th>
             <th>Current Value</th>
             {% if cert.plan_type == 'VGBL' %}<th>Earnings</th>{% endif %}
             <th>Age</th>
@@ -58,7 +61,7 @@
     </thead>
     <tbody>
     {% for lot in lots %}
-    <tr{% if lot.remaining_amount <= 0 %} style="opacity:0.4"{% endif %}>
+    <tr{% if lot.units_remaining <= 0.000001 %} style="opacity:0.4"{% endif %}>
         <td>{{ lot.id }}</td>
         <td>{{ lot.date }}</td>
         <td>
@@ -71,16 +74,16 @@
             {% endif %}
         </td>
         <td>R${{ "%.2f"|format(lot.original_amount) }}</td>
-        <td>R${{ "%.2f"|format(lot.remaining_amount) }}</td>
+        <td>{{ "%.4f"|format(lot.units_remaining) }}</td>
         <td>R${{ "%.2f"|format(lot.current_value) }}</td>
         {% if cert.plan_type == 'VGBL' %}
         <td style="color:#4CAF50">R${{ "%.2f"|format(lot.earnings) }}</td>
         {% endif %}
-        <td>{{ lot.months_held }} months</td>
+        <td>{{ lot.days_held }}d ({{ lot.months_held }}m)</td>
         <td>{{ "%.0f"|format(lot.current_rate * 100) }}%</td>
         <td>
             {% if lot.next_bracket %}
-                {{ "%.0f"|format(lot.next_bracket.rate * 100) }}% in {{ lot.next_bracket.months_until }} month(s)
+                {{ "%.0f"|format(lot.next_bracket.rate * 100) }}% in ~{{ lot.next_bracket.months_until }}mo ({{ lot.next_bracket.days_until }}d)
             {% else %}
                 <span style="color:#4CAF50">Minimum rate (10%)</span>
             {% endif %}

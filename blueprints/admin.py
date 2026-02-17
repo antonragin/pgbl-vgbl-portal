@@ -343,6 +343,11 @@ def edit_certificate(user_id, cert_id):
     cert_requests = models.list_requests(db, cert_id=cert_id)
     target_allocs = models.get_target_allocations(db, cert_id)
 
+    # Certificate units info
+    unit_price = models.get_certificate_unit_price(db, cert_id)
+    unit_supply = models.get_certificate_unit_supply(db, cert_id)
+    P_rem = models.get_vgbl_premium_remaining(db, cert_id)
+
     # Lot allocations audit trail
     lot_allocations = db.execute(
         "SELECT * FROM lot_allocations WHERE contribution_id IN "
@@ -359,6 +364,8 @@ def edit_certificate(user_id, cert_id):
                            funds=all_funds,
                            requests=cert_requests, target_allocs=target_allocs,
                            lot_allocations=lot_allocations,
+                           unit_price=unit_price, unit_supply=unit_supply,
+                           P_rem=P_rem,
                            sim_date=models.get_sim_date(db))
 
 

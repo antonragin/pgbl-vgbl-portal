@@ -4,24 +4,28 @@ Key rules:
 - PGBL: tax on total withdrawal amount (contributions were tax-deductible)
 - VGBL: tax only on earnings portion (contributions were not deductible)
 - Regressive (Lei 11.053): rates decrease with holding time, FIFO ordering
-- Progressive: standard IRPF brackets, 15% withheld at source
-- IOF 2026 (Decree 12.499/2025): 5% on VGBL contributions > R$600k/year
+- Progressive: standard IRPF brackets, 15% withheld at source (IRRF antecipação)
+- IOF (Decree 12.499/2025): configurable thresholds per year
 
-FIFO approach: each contribution has its own tax clock. On withdrawal, oldest
-contributions are consumed first. Each contribution's remaining_amount tracks
-unconsumed cost basis. Growth factor = total_value / total_remaining.
+Certificate units approach:
+- unit_price = total_value / unit_supply
+- Per-lot value = lot.units_remaining * unit_price (captures actual growth per lot)
+- VGBL earnings_ratio = 1 - (premium_remaining / total_value)
+- Regressive brackets use exact days, not months
 """
 
+from datetime import datetime
 import models
 
-# Regressive tax brackets: (max_months, rate)
+# Regressive tax brackets: (max_days, rate)
+# Legal boundaries: 2, 4, 6, 8, 10 years
 REGRESSIVE_BRACKETS = [
-    (24, 0.35),           # <= 2 years
-    (48, 0.30),           # 2-4 years
-    (72, 0.25),           # 4-6 years
-    (96, 0.20),           # 6-8 years
-    (120, 0.15),          # 8-10 years
-    (float('inf'), 0.10), # > 10 years
+    (730, 0.35),            # <= 2 years (365*2)
+    (1461, 0.30),           # 2-4 years (365*4 + 1 leap)
+    (2192, 0.25),           # 4-6 years (365*6 + 2 leap)
+    (2922, 0.20),           # 6-8 years (365*8 + 2 leap)
+    (3653, 0.15),           # 8-10 years (365*10 + 3 leap)
+    (float('inf'), 0.10),   # > 10 years
 ]
 
 # Progressive IRPF monthly brackets (2026): (up_to, rate, deduction)
@@ -33,69 +37,76 @@ PROGRESSIVE_BRACKETS = [
     (float('inf'), 0.275, 896.00),
 ]
 
-IOF_VGBL_THRESHOLD = 600_000.0  # R$ per calendar year
-IOF_VGBL_RATE = 0.05            # 5%
 
-
-def regressive_rate(months_held):
-    """Look up regressive tax rate for a given holding period in months."""
-    for max_months, rate in REGRESSIVE_BRACKETS:
-        if months_held <= max_months:
+def regressive_rate(days_held):
+    """Look up regressive tax rate for a given holding period in days."""
+    for max_days, rate in REGRESSIVE_BRACKETS:
+        if days_held <= max_days:
             return rate
     return 0.10
 
 
 def calculate_regressive_tax(contributions, withdrawal_amount, plan_type,
-                             total_remaining_sum, current_total_value):
+                             current_total_value, unit_price=None,
+                             vgbl_premium_remaining=0.0):
     """
-    FIFO-based regressive tax calculation using remaining contributions.
-
-    Uses growth_factor = total_value / total_remaining (remaining, not original).
-    On withdrawal, cost_basis_to_consume = withdrawal / growth_factor.
-    Per lot: PGBL taxable = consumed * growth_factor; VGBL taxable = consumed * growth_factor - consumed.
+    FIFO-based regressive tax calculation using certificate units.
 
     Args:
-        contributions: list of dicts with 'amount' (remaining_amount), 'months_held',
+        contributions: list of dicts with 'units_remaining', 'days_held', 'contribution_date'
                        sorted oldest-first (FIFO)
         withdrawal_amount: gross withdrawal amount
         plan_type: 'PGBL' or 'VGBL'
-        total_remaining_sum: sum of remaining_amount for active contributions
         current_total_value: current certificate total value
+        unit_price: certificate unit price (total_value / unit_supply)
+        vgbl_premium_remaining: certificate-level P_rem for VGBL
     """
-    if current_total_value <= 0 or withdrawal_amount <= 0 or total_remaining_sum <= 0:
+    if current_total_value <= 0 or withdrawal_amount <= 0:
         return {'gross': 0, 'tax': 0, 'net': 0, 'effective_rate': 0, 'breakdown': []}
 
-    growth_factor = current_total_value / total_remaining_sum
-    cost_basis_to_consume = withdrawal_amount / growth_factor
+    if unit_price is None or unit_price <= 0:
+        unit_price = 1.0
 
-    remaining = cost_basis_to_consume
+    units_to_consume = withdrawal_amount / unit_price
+
+    # VGBL earnings ratio (certificate-level)
+    if plan_type == 'VGBL' and current_total_value > 0:
+        earnings_ratio = max(0, 1 - (vgbl_premium_remaining / current_total_value))
+        taxable_total = withdrawal_amount * earnings_ratio
+    else:
+        earnings_ratio = 0
+        taxable_total = 0
+
+    remaining_units = units_to_consume
     total_tax = 0.0
     breakdown = []
 
     for contrib in contributions:
-        if remaining <= 1e-9:
+        if remaining_units <= 1e-9:
             break
 
-        available = contrib['amount']  # this is remaining_amount
-        consumed = min(remaining, available)
-        remaining -= consumed
+        available = contrib.get('units_remaining', 0)
+        if available <= 1e-9:
+            continue
+        consumed_units = min(remaining_units, available)
+        remaining_units -= consumed_units
 
-        rate = regressive_rate(contrib['months_held'])
+        lot_gross_value = consumed_units * unit_price
+        rate = regressive_rate(contrib['days_held'])
 
         if plan_type == 'PGBL':
-            taxable = consumed * growth_factor
+            taxable = lot_gross_value
         else:
-            # VGBL: only earnings portion is taxable
-            lot_value = consumed * growth_factor
-            taxable = lot_value - consumed
+            # VGBL: proportional share of taxable_total
+            taxable = (lot_gross_value / withdrawal_amount) * taxable_total if withdrawal_amount > 0 else 0
 
         tax_on_tranche = taxable * rate
         total_tax += tax_on_tranche
 
         breakdown.append({
-            'tranche_amount': round(consumed * growth_factor, 2),
-            'cost_basis': round(consumed, 2),
-            'months_held': contrib['months_held'],
+            'tranche_amount': round(lot_gross_value, 2),
+            'units_consumed': round(consumed_units, 6),
+            'days_held': contrib['days_held'],
             'rate': rate,
             'taxable': round(taxable, 2),
             'tax': round(tax_on_tranche, 2),
@@ -114,27 +125,28 @@ def calculate_regressive_tax(contributions, withdrawal_amount, plan_type,
 
 
 def calculate_progressive_tax(withdrawal_amount, plan_type,
-                              total_remaining_sum, current_total_value):
+                              current_total_value, vgbl_premium_remaining=0.0):
     """
-    Progressive tax calculation (IRPF brackets).
-    15% withheld at source as advance payment.
-    Uses remaining-based growth factor for VGBL.
+    Progressive tax calculation — IRRF antecipação.
+    15% withheld at source as advance payment against annual IRPF.
+    Uses certificate-level earnings_ratio for VGBL.
     """
     if withdrawal_amount <= 0:
         return {'gross': 0, 'taxable_base': 0, 'tax_withheld_15pct': 0,
-                'net': 0, 'effective_rate': 0, 'is_estimated': True}
+                'net': 0, 'effective_rate': 0, 'is_estimated': True,
+                'label': 'IRRF antecipação'}
 
     if plan_type == 'PGBL':
         taxable_base = withdrawal_amount
     else:
         # VGBL: only earnings are taxable
-        if current_total_value > 0 and total_remaining_sum > 0:
-            earnings_ratio = max(0, 1 - total_remaining_sum / current_total_value)
+        if current_total_value > 0:
+            earnings_ratio = max(0, 1 - (vgbl_premium_remaining / current_total_value))
             taxable_base = withdrawal_amount * earnings_ratio
         else:
             taxable_base = 0
 
-    # 15% withholding at source
+    # 15% withholding at source (IRRF antecipação)
     tax_withheld = taxable_base * 0.15
 
     # Estimated final tax using progressive brackets (monthly basis)
@@ -156,39 +168,43 @@ def calculate_progressive_tax(withdrawal_amount, plan_type,
         'net': round(net, 2),
         'effective_rate': round(effective_rate, 4),
         'is_estimated': True,
+        'label': 'IRRF antecipação',
+        'note': 'Final tax depends on annual income; this is illustrative only.',
     }
 
 
 def estimate_tax(db, certificate_id, withdrawal_amount):
     """
-    Pre-withdrawal tax estimate. Reads DB state and returns preview.
+    Pre-withdrawal tax estimate using certificate units.
     If regime not yet chosen, returns both estimates.
-    Uses remaining contributions only.
     """
     cert = models.get_certificate(db, certificate_id)
     if not cert:
         return {'error': 'Certificate not found'}
 
     plan_type = cert['plan_type']
-    total_remaining = models.total_remaining_contributions(db, certificate_id)
     total_value = models.get_certificate_total_value(db, certificate_id)
+    unit_price = models.get_certificate_unit_price(db, certificate_id)
+    P_rem = models.get_vgbl_premium_remaining(db, certificate_id)
 
     if withdrawal_amount > total_value:
         withdrawal_amount = total_value
 
-    # Build FIFO-ordered contribution list with ages (only those with remaining > 0)
-    sim_month = models.get_sim_month(db)
+    # Build FIFO-ordered contribution list with days-based ages
+    sim_date = models.get_sim_date(db)
+    current_dt = datetime.strptime(sim_date, '%Y-%m-%d')
     raw_contribs = models.list_contributions(db, certificate_id)
 
     contributions = []
     for c in raw_contribs:
-        if c['remaining_amount'] <= 1e-9:
+        if c['units_remaining'] <= 1e-9:
             continue
-        contrib_month = _date_to_sim_month(c['contribution_date'])
-        months_held = max(0, sim_month - contrib_month)
+        contrib_dt = datetime.strptime(c['contribution_date'], '%Y-%m-%d')
+        days_held = max(0, (current_dt - contrib_dt).days)
         contributions.append({
-            'amount': c['remaining_amount'],
-            'months_held': months_held,
+            'units_remaining': c['units_remaining'],
+            'remaining_amount': c['remaining_amount'],
+            'days_held': days_held,
             'date': c['contribution_date'],
         })
 
@@ -196,19 +212,20 @@ def estimate_tax(db, certificate_id, withdrawal_amount):
         'certificate_id': certificate_id,
         'plan_type': plan_type,
         'total_value': round(total_value, 2),
-        'total_remaining': round(total_remaining, 2),
+        'unit_price': round(unit_price, 6),
         'withdrawal_amount': round(withdrawal_amount, 2),
         'regime': cert['tax_regime'],
     }
 
     if cert['tax_regime'] == 'regressive' or cert['tax_regime'] is None:
         result['regressive'] = calculate_regressive_tax(
-            contributions, withdrawal_amount, plan_type, total_remaining, total_value
+            contributions, withdrawal_amount, plan_type,
+            total_value, unit_price, P_rem
         )
 
     if cert['tax_regime'] == 'progressive' or cert['tax_regime'] is None:
         result['progressive'] = calculate_progressive_tax(
-            withdrawal_amount, plan_type, total_remaining, total_value
+            withdrawal_amount, plan_type, total_value, P_rem
         )
 
     return result
@@ -216,12 +233,16 @@ def estimate_tax(db, certificate_id, withdrawal_amount):
 
 def calculate_iof_vgbl(db, user_id, contribution_amount, year=2026):
     """
-    IOF 2026 rule: 5% on VGBL contributions exceeding R$600k/year.
+    IOF on VGBL contributions exceeding configurable annual threshold.
+    Uses configurable limits/rates from sim_state.
     Includes user declaration for contributions at other issuers.
     Excludes transfers/portabilities from IOF base.
     """
     year_start = f"{year}-01-01"
     year_end = f"{year}-12-31"
+
+    # Get configurable IOF limit and rate for this year
+    iof_limit, iof_rate = models.get_iof_limit_for_year(db, year)
 
     # Only count source_type='contribution' (exclude transfers/portabilities)
     existing = db.execute("""
@@ -240,14 +261,14 @@ def calculate_iof_vgbl(db, user_id, contribution_amount, year=2026):
     total_before = existing + declared
     total_after = total_before + contribution_amount
 
-    if total_after <= IOF_VGBL_THRESHOLD:
+    if total_after <= iof_limit:
         return 0.0
 
-    excess_before = max(0, total_before - IOF_VGBL_THRESHOLD)
-    excess_after = max(0, total_after - IOF_VGBL_THRESHOLD)
+    excess_before = max(0, total_before - iof_limit)
+    excess_after = max(0, total_after - iof_limit)
     new_excess = excess_after - excess_before
 
-    return round(new_excess * IOF_VGBL_RATE, 2)
+    return round(new_excess * iof_rate, 2)
 
 
 def _date_to_sim_month(date_str):
@@ -256,3 +277,10 @@ def _date_to_sim_month(date_str):
     year = int(parts[0])
     month = int(parts[1])
     return (year - 2026) * 12 + (month - 1)
+
+
+def days_between(date_str1, date_str2):
+    """Compute exact days between two YYYY-MM-DD date strings."""
+    dt1 = datetime.strptime(date_str1, '%Y-%m-%d')
+    dt2 = datetime.strptime(date_str2, '%Y-%m-%d')
+    return abs((dt2 - dt1).days)
