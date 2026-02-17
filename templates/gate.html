@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Access Gate</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+</head>
+<body>
+    <main class="container" style="max-width: 400px; margin-top: 15vh;">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        {% for category, message in messages %}
+        <article class="flash-{{ category }}">{{ message }}</article>
+        {% endfor %}
+        {% endif %}
+        {% endwith %}
+
+        <article>
+            <header><strong>PGBL/VGBL Portal</strong></header>
+            <form method="post">
+                <label>
+                    Site Password
+                    <input type="password" name="password" required autofocus placeholder="Enter password">
+                </label>
+                <button type="submit">Enter</button>
+            </form>
+        </article>
+    </main>
+</body>
+</html>

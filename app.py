@@ -1,8 +1,12 @@
 """Flask app factory and entry point."""
 
 import os
-from flask import Flask, g, render_template, request, abort
+from flask import (Flask, g, render_template, request, redirect,
+                   url_for, session, flash)
 from database import get_db, init_db
+
+SITE_PASSWORD = os.environ.get('SITE_PASSWORD', 'OryxRulezzz2026!')
+VERSION_PREFIX = '/v0'
 
 
 def create_app():
@@ -14,9 +18,16 @@ def create_app():
 
     init_db(app)
 
-    # Per-request DB connection
+    # Per-request DB connection + site-wide password gate
     @app.before_request
     def before_request():
+        # Allow the gate page, root redirect, and static files without auth
+        if request.endpoint in ('gate', 'root', 'static'):
+            if request.endpoint != 'static':
+                g.db = get_db(app)
+            return
+        if not session.get('site_authenticated'):
+            return redirect(url_for('gate'))
         g.db = get_db(app)
 
     @app.teardown_request
@@ -25,16 +36,33 @@ def create_app():
         if db is not None:
             db.close()
 
-    # Register blueprints
+    # --- Site-wide password gate ---
+    @app.route(f'{VERSION_PREFIX}/gate', methods=['GET', 'POST'])
+    def gate():
+        if session.get('site_authenticated'):
+            return redirect(url_for('landing'))
+        if request.method == 'POST':
+            if request.form.get('password') == SITE_PASSWORD:
+                session['site_authenticated'] = True
+                return redirect(url_for('landing'))
+            flash('Incorrect password.', 'error')
+        return render_template('gate.html')
+
+    # --- Register blueprints under /v0 ---
     from blueprints.admin import admin_bp
     from blueprints.portal import portal_bp
-    app.register_blueprint(admin_bp, url_prefix='/admin')
-    app.register_blueprint(portal_bp, url_prefix='/portal')
+    app.register_blueprint(admin_bp, url_prefix=f'{VERSION_PREFIX}/admin')
+    app.register_blueprint(portal_bp, url_prefix=f'{VERSION_PREFIX}/portal')
 
     # Landing page
-    @app.route('/')
+    @app.route(f'{VERSION_PREFIX}/')
     def landing():
         return render_template('landing.html')
+
+    # Root redirect
+    @app.route('/')
+    def root():
+        return redirect(url_for('landing'))
 
     return app
 

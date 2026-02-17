@@ -16,9 +16,9 @@
         </ul>
         <ul>
             {% block nav_links %}
-            <li><a href="/">Home</a></li>
-            <li><a href="/admin/">Admin</a></li>
-            <li><a href="/portal/">Portal</a></li>
+            <li><a href="{{ url_for('landing') }}">Home</a></li>
+            <li><a href="{{ url_for('admin.dashboard') }}">Admin</a></li>
+            <li><a href="{{ url_for('portal.login') }}">Portal</a></li>
             {% endblock %}
         </ul>
     </nav>
