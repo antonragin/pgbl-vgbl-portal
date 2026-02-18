@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS contributions (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     certificate_id      INTEGER NOT NULL REFERENCES certificates(id) ON DELETE CASCADE,
     amount              REAL NOT NULL,
+    gross_amount        REAL,
     remaining_amount    REAL NOT NULL,
     contribution_date   TEXT NOT NULL,
     source_type         TEXT NOT NULL DEFAULT 'contribution'
@@ -281,6 +282,11 @@ def upgrade_schema(db):
         db.commit()
     if 'issue_unit_price' not in contrib_cols:
         db.execute("ALTER TABLE contributions ADD COLUMN issue_unit_price REAL NOT NULL DEFAULT 0.0")
+        db.commit()
+    if 'gross_amount' not in contrib_cols:
+        db.execute("ALTER TABLE contributions ADD COLUMN gross_amount REAL")
+        # Backfill: for existing contributions, gross_amount = amount (no IOF retroactively)
+        db.execute("UPDATE contributions SET gross_amount = amount WHERE gross_amount IS NULL AND source_type = 'contribution'")
         db.commit()
 
     # --- lot_allocations: add days_held if missing ---

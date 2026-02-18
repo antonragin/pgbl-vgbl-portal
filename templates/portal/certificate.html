@@ -26,11 +26,20 @@
             <p>Total Contributed: R${{ "%.2f"|format(total_contribs) }}</p>
             <p>Cost Basis (Remaining): R${{ "%.2f"|format(total_remaining) }}</p>
             <p>Gain/Loss: <span style="color:{{ '#4CAF50' if gain >= 0 else '#f44336' }}">R${{ "%.2f"|format(gain) }} ({{ "%.1f"|format(gain/total_contribs*100 if total_contribs > 0 else 0) }}%)</span></p>
+            {% if plan_type == 'VGBL' %}
+            <p style="border-left: 3px solid #26C6DA; padding-left: 0.5em; margin-top: 0.5em">
+                <strong>VGBL Tax Basis:</strong><br>
+                Premium basis (remaining): R${{ "%.2f"|format(P_rem) }}<br>
+                Taxable earnings (approx): <strong>R${{ "%.2f"|format([total_value - P_rem, 0]|max) }}</strong>
+                {% if total_value > 0 %}
+                <br><small>Earnings ratio: {{ "%.1f"|format((1 - P_rem / total_value) * 100 if total_value > 0 else 0) }}% of withdrawals are taxable</small>
+                {% endif %}
+            </p>
+            {% endif %}
             <p>Created: {{ cert.created_date }}</p>
             <p style="opacity:0.7"><small>
                 Unit Supply: {{ "%.6f"|format(unit_supply) }} |
                 Unit Price: R${{ "%.6f"|format(unit_price) }}
-                {% if plan_type == 'VGBL' %} | P<sub>rem</sub>: R${{ "%.2f"|format(P_rem) }}{% endif %}
             </small></p>
         </div>
         <div>
@@ -132,7 +141,7 @@
                 Regular
             {% endif %}
         </td>
-        <td>{{ ca.days_held }}d ({{ ca.months_held }}m)</td>
+        <td>{{ ca.days_held }}d (~{{ ca.months_held }}m)</td>
         <td>{{ "%.0f"|format(ca.current_rate * 100) }}%</td>
         <td>
             {% if ca.next_bracket %}

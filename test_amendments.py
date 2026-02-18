@@ -479,10 +479,10 @@ def test_iof_with_declaration():
         assert abs(unit_supply - 97500.0) < 0.01, \
             f"Unit supply should be 97500, got {unit_supply}"
 
-        # VGBL P_rem should be set
+        # VGBL P_rem should use gross amount (investor paid full premium, IOF is a tax)
         P_rem = models.get_vgbl_premium_remaining(db, cert_id)
-        assert abs(P_rem - 97500.0) < 0.01, \
-            f"VGBL P_rem should be R$97500, got R${P_rem}"
+        assert abs(P_rem - 100000.0) < 0.01, \
+            f"VGBL P_rem should be R$100000 (gross), got R${P_rem}"
 
         # Verify IOF log message
         assert any('IOF' in e for e in step_log['events']), \
@@ -804,17 +804,25 @@ def test_calendar_year_brackets():
         rate_before = tax_engine.regressive_rate(contrib_date, '2026-02-27')
         assert rate_before == 0.35, f"Expected 35% before 2yr boundary, got {rate_before*100}%"
 
-        # Exactly on 2-year boundary (2026-02-28 for leap day): should be 30% (past boundary)
+        # Exactly on 2-year boundary (2026-02-28 for leap day): still 35% (inclusive <=)
         # relativedelta: 2024-02-29 + 2y = 2026-02-28
-        # So 2026-02-28 < 2026-02-28 is False → moves to next bracket (30%)
+        # Lei 11.053: 'inferior ou igual' (<=) for boundary
         rate_on = tax_engine.regressive_rate(contrib_date, '2026-02-28')
-        assert rate_on == 0.30, f"Expected 30% on 2yr boundary, got {rate_on*100}%"
+        assert rate_on == 0.35, f"Expected 35% on 2yr boundary (inclusive), got {rate_on*100}%"
+
+        # Day after boundary: drops to 30%
+        rate_after = tax_engine.regressive_rate(contrib_date, '2026-03-01')
+        assert rate_after == 0.30, f"Expected 30% day after 2yr boundary, got {rate_after*100}%"
 
         # Regular date: 2024-01-01 + 2yr = 2026-01-01
         rate_2yr = tax_engine.regressive_rate('2024-01-01', '2025-12-31')
         assert rate_2yr == 0.35, f"Expected 35% day before 2yr, got {rate_2yr*100}%"
+        # On the boundary: still 35% (inclusive)
         rate_2yr_on = tax_engine.regressive_rate('2024-01-01', '2026-01-01')
-        assert rate_2yr_on == 0.30, f"Expected 30% on 2yr boundary, got {rate_2yr_on*100}%"
+        assert rate_2yr_on == 0.35, f"Expected 35% on 2yr boundary (inclusive), got {rate_2yr_on*100}%"
+        # Day after boundary: drops to 30%
+        rate_2yr_after = tax_engine.regressive_rate('2024-01-01', '2026-01-02')
+        assert rate_2yr_after == 0.30, f"Expected 30% day after 2yr boundary, got {rate_2yr_after*100}%"
 
         # Test > 10 years
         rate_old = tax_engine.regressive_rate('2014-01-01', '2026-01-01')
@@ -1001,10 +1009,228 @@ def test_vgbl_lot_earnings_ratio():
 
 
 # ==========================================================================
+# Test 13: Regressive bracket exact anniversaries (E.1)
+# ==========================================================================
+def test_regressive_exact_anniversaries():
+    """Test that exact 2/4/6/8/10 year anniversary dates stay at the higher rate
+    (inclusive boundary per Lei 11.053), and the day after drops."""
+    app, db, ctx, tmp_path = _setup_db()
+    try:
+        contrib_date = '2020-01-15'
+
+        # Exact 2-year anniversary: still 35%
+        assert tax_engine.regressive_rate(contrib_date, '2022-01-15') == 0.35, \
+            "Exact 2yr should still be 35%"
+        # Day after: drops to 30%
+        assert tax_engine.regressive_rate(contrib_date, '2022-01-16') == 0.30, \
+            "Day after 2yr should be 30%"
+
+        # Exact 4-year anniversary: still 30%
+        assert tax_engine.regressive_rate(contrib_date, '2024-01-15') == 0.30, \
+            "Exact 4yr should still be 30%"
+        assert tax_engine.regressive_rate(contrib_date, '2024-01-16') == 0.25, \
+            "Day after 4yr should be 25%"
+
+        # Exact 6-year anniversary: still 25%
+        assert tax_engine.regressive_rate(contrib_date, '2026-01-15') == 0.25, \
+            "Exact 6yr should still be 25%"
+        assert tax_engine.regressive_rate(contrib_date, '2026-01-16') == 0.20, \
+            "Day after 6yr should be 20%"
+
+        # Exact 8-year anniversary: still 20%
+        assert tax_engine.regressive_rate(contrib_date, '2028-01-15') == 0.20, \
+            "Exact 8yr should still be 20%"
+        assert tax_engine.regressive_rate(contrib_date, '2028-01-16') == 0.15, \
+            "Day after 8yr should be 15%"
+
+        # Exact 10-year anniversary: still 15%
+        assert tax_engine.regressive_rate(contrib_date, '2030-01-15') == 0.15, \
+            "Exact 10yr should still be 15%"
+        assert tax_engine.regressive_rate(contrib_date, '2030-01-16') == 0.10, \
+            "Day after 10yr should be 10%"
+
+        # next_bracket_drop on the boundary day should have days_until=1
+        drop = tax_engine.next_bracket_drop(contrib_date, '2022-01-15')
+        assert drop is not None
+        assert drop['days_until'] == 1, \
+            f"On boundary day, next drop should be 1 day away, got {drop['days_until']}"
+        assert drop['rate'] == 0.30
+
+        print("  PASS: test_regressive_exact_anniversaries")
+    finally:
+        ctx.pop()
+        os.unlink(tmp_path)
+
+
+# ==========================================================================
+# Test 14: VGBL pro-rata earnings on partial withdrawal (E.2)
+# ==========================================================================
+def test_vgbl_prorata_earnings():
+    """Withdraw 10% of VGBL cert. Confirm taxable_base = withdrawal * earnings_ratio."""
+    app, db, ctx, tmp_path = _setup_db()
+    try:
+        plan_id = _create_plan(db, 'VGBL')
+        fund_id = _create_fund_with_growth(db, monthly_return=0.01, nav=10.0)
+        user_id = models.create_user(db, 'prorata@test.com', False)
+        models.set_brokerage_cash(db, user_id, 50000)
+
+        models.set_sim_date(db, '2024-01-01')
+        models.set_sim_month(db, 0)
+
+        cert_id = _setup_cert_with_units(db, user_id, plan_id, fund_id,
+                                         [(10000.0, '2024-01-01')],
+                                         plan_type='VGBL')
+        models.set_tax_regime(db, cert_id, 'regressive')
+
+        # Evolve 12 months to get growth
+        for step in range(12):
+            time_engine._update_fund_navs(db, step + 1)
+        models.set_sim_month(db, 12)
+        models.set_sim_date(db, '2025-01-01')
+
+        total_value = models.get_certificate_total_value(db, cert_id)
+        P_rem = models.get_vgbl_premium_remaining(db, cert_id)
+        earnings_ratio = 1 - (P_rem / total_value)
+
+        # Withdraw 10%
+        withdrawal_amount = total_value * 0.10
+        estimate = tax_engine.estimate_tax(db, cert_id, withdrawal_amount)
+        reg = estimate['regressive']
+
+        # taxable = withdrawal * earnings_ratio
+        expected_taxable = withdrawal_amount * earnings_ratio
+        actual_taxable = sum(b['taxable'] for b in reg['breakdown'])
+
+        assert abs(actual_taxable - expected_taxable) < 1.0, \
+            f"Taxable base should be ~R${expected_taxable:.2f}, got R${actual_taxable:.2f}"
+
+        # Tax should be < taxable * 0.35 (rate is 35% for <2yr)
+        assert reg['tax'] > 0
+        assert abs(reg['tax'] - actual_taxable * 0.35) < 1.0
+
+        print("  PASS: test_vgbl_prorata_earnings")
+    finally:
+        ctx.pop()
+        os.unlink(tmp_path)
+
+
+# ==========================================================================
+# Test 15: IOF uses gross amounts for threshold (E.3)
+# ==========================================================================
+def test_iof_gross_amount_tracking():
+    """After a contribution with IOF, the next IOF calc should use the gross amount
+    (not the net amount) when computing how much has been contributed this year."""
+    app, db, ctx, tmp_path = _setup_db()
+    try:
+        plan_id = _create_plan(db, 'VGBL')
+        fund_id = _create_fund(db, nav=10.0)
+        user_id = models.create_user(db, 'iof_gross@test.com', False)
+        models.set_brokerage_cash(db, user_id, 2000000)
+
+        models.set_sim_date(db, '2026-01-01')
+        models.set_sim_month(db, 0)
+
+        cert_id = models.create_certificate(db, user_id, plan_id, '2026-01-01')
+        models.set_target_allocations(db, cert_id, [(fund_id, 100)])
+
+        # First contribution: R$650k (exceeds 600k limit by 50k)
+        iof_1 = tax_engine.calculate_iof_vgbl(db, user_id, 650000, 2026)
+        assert abs(iof_1 - 2500.0) < 0.01, f"First IOF should be R$2500 (5% of 50k excess), got {iof_1}"
+
+        # Execute the contribution through time engine
+        req_id = models.create_request(db, user_id, cert_id, 'contribution',
+                                        {'amount': 650000}, '2026-01-01')
+        step_log = {'month': 0, 'events': []}
+        req = db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
+        details = json.loads(req['details'])
+        time_engine._execute_contribution(db, req, details, '2026-01-01', step_log)
+
+        # Check that gross_amount is stored
+        contribs = models.list_contributions(db, cert_id)
+        assert contribs[0]['gross_amount'] == 650000.0, \
+            f"gross_amount should be 650000, got {contribs[0]['gross_amount']}"
+        assert abs(contribs[0]['amount'] - 647500.0) < 0.01, \
+            f"amount (net) should be 647500, got {contribs[0]['amount']}"
+
+        # Second contribution: R$100k. Since gross 650k already counted,
+        # the entire 100k is above the 600k limit -> IOF = 100k * 5% = 5000
+        iof_2 = tax_engine.calculate_iof_vgbl(db, user_id, 100000, 2026)
+        assert abs(iof_2 - 5000.0) < 0.01, \
+            f"Second IOF should be R$5000 (all 100k above limit), got {iof_2}"
+
+        print("  PASS: test_iof_gross_amount_tracking")
+    finally:
+        ctx.pop()
+        os.unlink(tmp_path)
+
+
+# ==========================================================================
+# Test 16: Portability preserves dates and FIFO ordering (E.4)
+# ==========================================================================
+def test_portability_preserves_dates_fifo():
+    """Transfer value between certs. Verify contribution dates are preserved,
+    FIFO ordering maintained, and VGBL premium_remaining moves pro-rata."""
+    app, db, ctx, tmp_path = _setup_db()
+    try:
+        plan_id = _create_plan(db, 'VGBL')
+        fund_id = _create_fund(db, nav=10.0)
+        user_id = models.create_user(db, 'port@test.com', False)
+        models.set_brokerage_cash(db, user_id, 50000)
+
+        models.set_sim_date(db, '2024-01-01')
+        models.set_sim_month(db, 0)
+
+        # Source cert with multiple dated contributions
+        src_cert = _setup_cert_with_units(db, user_id, plan_id, fund_id,
+                                          [(5000.0, '2022-01-01'), (5000.0, '2024-01-01')],
+                                          plan_type='VGBL')
+
+        # Dest cert (empty)
+        dest_cert = models.create_certificate(db, user_id, plan_id, '2024-01-01')
+        models.set_target_allocations(db, dest_cert, [(fund_id, 100)])
+
+        src_P_rem = models.get_vgbl_premium_remaining(db, src_cert)
+        src_value = models.get_certificate_total_value(db, src_cert)
+
+        # Transfer full value via portability
+        req_id = models.create_request(db, user_id, src_cert, 'portability_out',
+                                        {'destination_cert_id': dest_cert, 'amount': src_value},
+                                        '2024-01-01')
+        step_log = {'month': 0, 'events': []}
+        req = db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
+        details = json.loads(req['details'])
+        time_engine._execute_portability(db, req, details, '2024-01-01', step_log)
+
+        # Destination should have contributions with original dates
+        dest_contribs = models.list_contributions(db, dest_cert)
+        dates = sorted([c['contribution_date'] for c in dest_contribs])
+        assert '2022-01-01' in dates, "Should preserve 2022 date"
+        assert '2024-01-01' in dates, "Should preserve 2024 date"
+        assert all(c['source_type'] == 'transfer_external' for c in dest_contribs)
+
+        # FIFO ordering: older lot first
+        assert dest_contribs[0]['contribution_date'] <= dest_contribs[1]['contribution_date'], \
+            "Lots should be in FIFO order (oldest first)"
+
+        # P_rem should have moved to destination
+        dest_P_rem = models.get_vgbl_premium_remaining(db, dest_cert)
+        src_P_rem_after = models.get_vgbl_premium_remaining(db, src_cert)
+        assert abs(dest_P_rem - src_P_rem) < 1.0, \
+            f"Dest P_rem should be ~{src_P_rem}, got {dest_P_rem}"
+        assert src_P_rem_after < 1.0, \
+            f"Source P_rem should be ~0, got {src_P_rem_after}"
+
+        print("  PASS: test_portability_preserves_dates_fifo")
+    finally:
+        ctx.pop()
+        os.unlink(tmp_path)
+
+
+# ==========================================================================
 # Runner
 # ==========================================================================
 def run_all():
-    print("Running Amendment v3 acceptance tests...\n")
+    print("Running Amendment v5 acceptance tests...\n")
     tests = [
         test_progressive_lot_consumption,
         test_transfer_then_withdrawal,
@@ -1018,6 +1244,10 @@ def run_all():
         test_admin_contribution_units,
         test_reconcile_units,
         test_vgbl_lot_earnings_ratio,
+        test_regressive_exact_anniversaries,
+        test_vgbl_prorata_earnings,
+        test_iof_gross_amount_tracking,
+        test_portability_preserves_dates_fifo,
     ]
     passed = 0
     failed = 0

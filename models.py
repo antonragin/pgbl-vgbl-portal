@@ -206,9 +206,16 @@ def set_certificate_phase(db, cert_id, phase):
     db.commit()
 
 
-def set_tax_regime(db, cert_id, regime):
+def set_tax_regime(db, cert_id, regime, force=False):
+    """Set tax regime. Only succeeds if currently NULL (irrevocable once set).
+    Use force=True for admin override (sim-backend only)."""
+    if not force:
+        current = db.execute("SELECT tax_regime FROM certificates WHERE id = ?", (cert_id,)).fetchone()
+        if current and current['tax_regime'] is not None:
+            return False  # Already set, irrevocable
     db.execute("UPDATE certificates SET tax_regime = ? WHERE id = ?", (regime, cert_id))
     db.commit()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -286,14 +293,14 @@ def get_target_allocations(db, cert_id):
 
 def add_contribution(db, cert_id, amount, contribution_date, source_type='contribution',
                      remaining_amount=None, units_total=0.0, units_remaining=0.0,
-                     issue_unit_price=0.0):
+                     issue_unit_price=0.0, gross_amount=None):
     if remaining_amount is None:
         remaining_amount = amount
     cur = db.execute(
-        "INSERT INTO contributions (certificate_id, amount, remaining_amount, "
+        "INSERT INTO contributions (certificate_id, amount, gross_amount, remaining_amount, "
         "contribution_date, source_type, units_total, units_remaining, issue_unit_price) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (cert_id, amount, remaining_amount, contribution_date, source_type,
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (cert_id, amount, gross_amount, remaining_amount, contribution_date, source_type,
          units_total, units_remaining, issue_unit_price)
     )
     db.commit()
@@ -315,6 +322,16 @@ def total_contributions(db, cert_id):
     return row['total']
 
 
+def total_gross_contributions(db, cert_id):
+    """Sum of gross_amount (or amount if gross_amount is NULL) for contributions."""
+    row = db.execute(
+        "SELECT COALESCE(SUM(COALESCE(gross_amount, amount)), 0) as total "
+        "FROM contributions WHERE certificate_id = ?",
+        (cert_id,)
+    ).fetchone()
+    return row['total']
+
+
 def total_remaining_contributions(db, cert_id):
     """Sum of remaining_amount for contributions with remaining > 0."""
     row = db.execute(
@@ -327,7 +344,7 @@ def total_remaining_contributions(db, cert_id):
 
 def consume_lots_fifo(db, cert_id, units_to_consume):
     """Consume oldest lots first by reducing units_remaining.
-    Also reduces remaining_amount proportionally.
+    Also reduces remaining_amount proportionally to units consumed from each lot.
     Returns list of dicts with units_consumed and consumed_amount per lot."""
     contributions = db.execute(
         "SELECT * FROM contributions WHERE certificate_id = ? AND units_remaining > 1e-9 "
@@ -346,12 +363,9 @@ def consume_lots_fifo(db, cert_id, units_to_consume):
         take_units = min(available_units, remaining_units)
         new_units_remaining = available_units - take_units
 
-        # Reduce remaining_amount proportionally
-        if c['units_total'] > 1e-9:
-            fraction_consumed = take_units / c['units_total']
-        else:
-            fraction_consumed = take_units / available_units if available_units > 1e-9 else 1.0
+        # Reduce remaining_amount proportionally to units consumed from this lot
         consumed_amount = c['remaining_amount'] * (take_units / available_units) if available_units > 1e-9 else c['remaining_amount']
+
         new_remaining_amount = c['remaining_amount'] - consumed_amount
 
         # Epsilon cleanup: snap near-zero values to 0
@@ -482,7 +496,8 @@ def create_request(db, user_id, cert_id, type_, details, created_date):
     return cur.lastrowid
 
 
-def list_requests(db, user_id=None, status=None, cert_id=None):
+def list_requests(db, user_id=None, status=None, cert_id=None, type_=None,
+                   order='DESC'):
     query = "SELECT * FROM requests WHERE 1=1"
     params = []
     if user_id is not None:
@@ -494,7 +509,10 @@ def list_requests(db, user_id=None, status=None, cert_id=None):
     if cert_id is not None:
         query += " AND certificate_id = ?"
         params.append(cert_id)
-    query += " ORDER BY id DESC"
+    if type_ is not None:
+        query += " AND type = ?"
+        params.append(type_)
+    query += f" ORDER BY created_date {order}, id {order}"
     return db.execute(query, params).fetchall()
 
 
@@ -616,12 +634,18 @@ def set_external_portin_schedule(db, schedule):
 # ---------------------------------------------------------------------------
 
 def get_certificate_unit_price(db, cert_id):
-    """Compute unit_price = total_value / unit_supply. Returns 1.0 if no units yet."""
+    """Compute unit_price = total_value / unit_supply.
+    Returns 1.0 if no units yet (new certificate).
+    Warns if unit_supply > 0 but total_value == 0 (invariant violation)."""
     cert = db.execute("SELECT unit_supply FROM certificates WHERE id = ?", (cert_id,)).fetchone()
     if not cert or cert['unit_supply'] <= 1e-9:
         return 1.0
     total_value = get_certificate_total_value(db, cert_id)
     if total_value <= 0:
+        # Invariant violation: units exist but no holdings value
+        # Return small positive to avoid division by zero; callers should check
+        import logging
+        logging.warning(f"Certificate {cert_id}: unit_supply={cert['unit_supply']} but total_value=0")
         return 1.0
     return total_value / cert['unit_supply']
 
@@ -726,5 +750,30 @@ def set_external_portin_gain_pct(db, pct):
     db.execute(
         "INSERT OR REPLACE INTO sim_state (key, value) VALUES ('external_portin_embedded_gain_pct', ?)",
         (str(pct),)
+    )
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Progressive Tax Brackets Config
+# ---------------------------------------------------------------------------
+
+def get_progressive_brackets(db):
+    """Get configurable progressive IRPF brackets from sim_state.
+    Returns list of [up_to, rate, deduction] triples.
+    Falls back to defaults if not configured."""
+    row = db.execute(
+        "SELECT value FROM sim_state WHERE key = 'progressive_brackets'"
+    ).fetchone()
+    if row:
+        return json.loads(row['value'])
+    return None  # use defaults
+
+
+def set_progressive_brackets(db, brackets):
+    """Set progressive IRPF brackets. brackets: list of [up_to, rate, deduction]."""
+    db.execute(
+        "INSERT OR REPLACE INTO sim_state (key, value) VALUES ('progressive_brackets', ?)",
+        (json.dumps(brackets),)
     )
     db.commit()

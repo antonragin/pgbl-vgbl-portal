@@ -327,8 +327,8 @@ def edit_certificate(user_id, cert_id):
         elif action == 'set_regime':
             regime = request.form.get('tax_regime')
             if regime in ('progressive', 'regressive'):
-                models.set_tax_regime(db, cert_id, regime)
-                flash(f'Tax regime set to {regime}.', 'success')
+                models.set_tax_regime(db, cert_id, regime, force=True)
+                flash(f'Tax regime set to {regime} (admin override).', 'success')
 
         elif action == 'add_withdrawal':
             gross = safe_float(request.form.get('gross_amount'))
@@ -425,6 +425,46 @@ def reject_request(req_id):
 # ---------------------------------------------------------------------------
 # Time Control
 # ---------------------------------------------------------------------------
+
+@admin_bp.route('/tax-config', methods=['GET', 'POST'])
+def tax_config():
+    db = g.db
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'set_progressive_brackets':
+            brackets = []
+            for i in range(5):
+                up_to = request.form.get(f'bracket_{i}_up_to', '').strip()
+                rate = safe_float(request.form.get(f'bracket_{i}_rate'))
+                deduction = safe_float(request.form.get(f'bracket_{i}_deduction'))
+                if up_to:
+                    up_to_val = 'inf' if up_to.lower() == 'inf' else safe_float(up_to)
+                    brackets.append([up_to_val, rate, deduction])
+            if brackets:
+                models.set_progressive_brackets(db, brackets)
+                flash(f'Progressive brackets updated ({len(brackets)} brackets).', 'success')
+            else:
+                flash('No valid brackets provided.', 'error')
+        elif action == 'reset_progressive_brackets':
+            db.execute("DELETE FROM sim_state WHERE key = 'progressive_brackets'")
+            db.commit()
+            flash('Progressive brackets reset to defaults.', 'success')
+        return redirect(url_for('admin.tax_config'))
+
+    import tax_engine
+    current_brackets = models.get_progressive_brackets(db)
+    if current_brackets is None:
+        current_brackets = [[b[0] if b[0] != float('inf') else 'inf', b[1], b[2]]
+                            for b in tax_engine.DEFAULT_PROGRESSIVE_BRACKETS]
+        is_default = True
+    else:
+        is_default = False
+
+    iof_config = models.get_iof_config(db)
+    return render_template('admin/tax_config.html',
+                           brackets=current_brackets, is_default=is_default,
+                           iof_config=iof_config)
+
 
 @admin_bp.route('/time/evolve', methods=['POST'])
 def evolve_time():

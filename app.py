@@ -6,7 +6,7 @@ from flask import (Flask, g, render_template, request, redirect,
 from database import get_db, init_db
 
 SITE_PASSWORD = os.environ.get('SITE_PASSWORD', 'OryxRulezzz2026!')
-VERSION_PREFIX = '/v5'
+VERSION_PREFIX = '/v7'
 
 
 def create_app():

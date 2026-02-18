@@ -76,9 +76,16 @@ def home():
         holdings = models.get_holdings(db, c['id'])
         total_contribs = models.total_contributions(db, c['id'])
         gain = total_val - total_contribs
+        P_rem = models.get_vgbl_premium_remaining(db, c['id'])
+        # VGBL taxable earnings = total_value - premium_remaining
+        if c['plan_type'] == 'VGBL' and total_val > 0:
+            taxable_earnings = max(0, total_val - P_rem)
+        else:
+            taxable_earnings = None
         cert_data.append({
             'cert': c, 'total_value': total_val, 'holdings': holdings,
             'total_contribs': total_contribs, 'gain': gain,
+            'P_rem': P_rem, 'taxable_earnings': taxable_earnings,
         })
 
     total_invested = sum(cd['total_value'] for cd in cert_data)
@@ -184,6 +191,11 @@ def new_certificate():
 
         sim_date = models.get_sim_date(db)
         cert_id = models.create_certificate(db, user_id, plan_id, sim_date)
+
+        # Set tax regime at creation (irrevocable)
+        tax_regime = request.form.get('tax_regime')
+        if tax_regime in ('progressive', 'regressive'):
+            models.set_tax_regime(db, cert_id, tax_regime)
 
         # Set target allocations from form
         funds = models.list_funds(db)
@@ -319,7 +331,7 @@ def contribute(cert_id):
             msg = f'Contribution of R${amount:,.2f} submitted (pending next time evolution).'
             if iof > 0:
                 net = amount - iof
-                msg += f' IOF: R${iof:,.2f} (net invested: R${net:,.2f})'
+                msg += f' Estimated IOF: R${iof:,.2f} (est. net invested: R${net:,.2f}). Final IOF calculated at execution.'
             flash(msg, 'success')
             return redirect(url_for('portal.certificate_detail', cert_id=cert_id))
 
@@ -331,9 +343,9 @@ def contribute(cert_id):
         sim_date = models.get_sim_date(db)
         year = int(sim_date[:4])
         iof_limit, iof_rate = models.get_iof_limit_for_year(db, year)
-        # Only count source_type='contribution' for IOF base
+        # Only count source_type='contribution' for IOF base (use gross_amount for accuracy)
         existing_vgbl = db.execute("""
-            SELECT COALESCE(SUM(co.amount), 0) as total
+            SELECT COALESCE(SUM(COALESCE(co.gross_amount, co.amount)), 0) as total
             FROM contributions co
             JOIN certificates ce ON co.certificate_id = ce.id
             JOIN plans p ON ce.plan_id = p.id
@@ -371,13 +383,16 @@ def withdraw(cert_id):
     total_value = models.get_certificate_total_value(db, cert_id)
 
     if request.method == 'POST':
-        # Handle tax regime selection
+        # Handle tax regime selection (should have been set at creation, but allow fallback)
         if cert['tax_regime'] is None:
             regime = request.form.get('tax_regime')
             if regime not in ('progressive', 'regressive'):
-                flash('You must select a tax regime before withdrawing.', 'error')
+                flash('You must select a tax regime before withdrawing. '
+                      'This should have been set when you created the certificate.', 'error')
                 return redirect(url_for('portal.withdraw', cert_id=cert_id))
-            models.set_tax_regime(db, cert_id, regime)
+            if not models.set_tax_regime(db, cert_id, regime):
+                flash('Tax regime is already set and cannot be changed.', 'error')
+                return redirect(url_for('portal.withdraw', cert_id=cert_id))
             cert = models.get_certificate(db, cert_id)
             flash(f'Tax regime set to {regime}. This choice is IRREVOCABLE.', 'warning')
 
@@ -480,17 +495,7 @@ def switch_funds(cert_id):
 
 
 # ---------------------------------------------------------------------------
-# Portability (legacy redirect)
-# ---------------------------------------------------------------------------
-
-@portal_bp.route('/certificates/<int:cert_id>/portability')
-@login_required
-def portability(cert_id):
-    return redirect(url_for('portal.transfers'))
-
-
-# ---------------------------------------------------------------------------
-# Transfers
+# Transfers & Portability
 # ---------------------------------------------------------------------------
 
 @portal_bp.route('/transfers', methods=['GET', 'POST'])
@@ -618,9 +623,9 @@ def iof_declaration():
     current_declaration = models.get_iof_declaration(db, user_id, year)
     iof_limit, iof_rate = models.get_iof_limit_for_year(db, year)
 
-    # Get internal VGBL contributions this year
+    # Get internal VGBL contributions this year (use gross_amount for IOF accuracy)
     internal_vgbl = db.execute("""
-        SELECT COALESCE(SUM(co.amount), 0) as total
+        SELECT COALESCE(SUM(COALESCE(co.gross_amount, co.amount)), 0) as total
         FROM contributions co
         JOIN certificates ce ON co.certificate_id = ce.id
         JOIN plans p ON ce.plan_id = p.id

@@ -34,6 +34,11 @@
         <a href="{{ url_for('admin.requests_log') }}?status=pending">View &rarr;</a>
     </article>
     <article>
+        <header>Tax Config</header>
+        <p>Progressive brackets, IOF thresholds</p>
+        <a href="{{ url_for('admin.tax_config') }}">Configure &rarr;</a>
+    </article>
+    <article>
         <header>Time Control</header>
         <p>Current: Month {{ sim_month }} ({{ sim_date }})</p>
         <form method="post" action="{{ url_for('admin.evolve_time') }}">

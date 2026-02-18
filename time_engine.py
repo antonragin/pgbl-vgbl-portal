@@ -95,11 +95,9 @@ def _update_fund_navs(db, month):
 
 
 def _process_pending_requests(db, req_type, current_date, step_log):
-    """Process all pending requests of a given type."""
-    pending = models.list_requests(db, status='pending')
+    """Process all pending requests of a given type, in chronological order."""
+    pending = models.list_requests(db, status='pending', type_=req_type, order='ASC')
     for req in pending:
-        if req['type'] != req_type:
-            continue
         try:
             details = json.loads(req['details']) if req['details'] else {}
             if req_type == 'fund_swap':
@@ -137,15 +135,23 @@ def _execute_fund_swap(db, req, details, current_date, step_log):
         models.fail_request(db, req['id'])
         return
 
+    # Validate allocation sums to 100%
+    new_allocs = details.get('new_allocations', [])
+    total_pct = sum(a.get('pct', 0) for a in new_allocs)
+    if abs(total_pct - 100) > 0.5:
+        models.fail_request(db, req['id'])
+        step_log['events'].append(
+            f"Fund swap FAILED for certificate #{cert_id}: "
+            f"allocation sums to {total_pct}%, must be 100%"
+        )
+        return
+
     # Sell all current holdings
     holdings = models.get_holdings(db, cert_id)
     total_cash = 0.0
     for h in holdings:
         total_cash += h['units'] * h['current_nav']
         models.set_holding(db, cert_id, h['fund_id'], 0)
-
-    # Buy new allocation with fractional units
-    new_allocs = details.get('new_allocations', [])
     for alloc in new_allocs:
         fund = models.get_fund(db, alloc['fund_id'])
         if not fund or fund['current_nav'] <= 0:
@@ -196,6 +202,24 @@ def _execute_withdrawal(db, req, details, current_date, step_log):
     unit_price = models.get_certificate_unit_price(db, cert_id)
     units_to_redeem = amount / unit_price if unit_price > 0 else 0
 
+    # Invariant check: ensure lots exist and are consistent
+    unit_supply = models.get_certificate_unit_supply(db, cert_id)
+    if unit_supply < units_to_redeem - 1e-6:
+        # Try auto-reconcile first
+        models.reconcile_certificate_units(db, cert_id)
+        unit_supply = models.get_certificate_unit_supply(db, cert_id)
+        if unit_supply < units_to_redeem - 1e-6:
+            models.fail_request(db, req['id'])
+            step_log['events'].append(
+                f"Withdrawal FAILED for certificate #{cert_id}: "
+                f"unit supply ({unit_supply:.4f}) < units to redeem ({units_to_redeem:.4f}). "
+                f"Reconcile certificate units first."
+            )
+            return
+
+    # Get VGBL P_rem BEFORE selling (for earnings ratio and lot consumption)
+    P_rem = models.get_vgbl_premium_remaining(db, cert_id)
+
     # Sell fund holdings proportionally to raise the gross amount
     if not _sell_holdings(db, cert_id, amount):
         models.fail_request(db, req['id'])
@@ -206,9 +230,6 @@ def _execute_withdrawal(db, req, details, current_date, step_log):
 
     # Consume lots FIFO by units
     consumed_lots = models.consume_lots_fifo(db, cert_id, units_to_redeem)
-
-    # Get VGBL P_rem BEFORE updating it (for earnings ratio)
-    P_rem = models.get_vgbl_premium_remaining(db, cert_id)
 
     # Compute per-lot tax using days-based brackets
     current_dt = datetime.strptime(current_date, '%Y-%m-%d')
@@ -354,18 +375,20 @@ def _execute_contribution(db, req, details, current_date, step_log):
     unit_price = models.get_certificate_unit_price(db, cert_id)
     units_issued = net_invest / unit_price
 
-    # Record contribution with unit info
+    # Record contribution with unit info (gross_amount for IOF tracking)
     models.add_contribution(db, cert_id, net_invest, current_date,
                             remaining_amount=net_invest,
                             units_total=units_issued, units_remaining=units_issued,
-                            issue_unit_price=unit_price)
+                            issue_unit_price=unit_price,
+                            gross_amount=amount)
 
     # Update certificate unit supply
     models.update_certificate_units(db, cert_id, units_issued)
 
-    # Update VGBL premium_remaining
+    # Update VGBL premium_remaining (use gross amount — the investor paid the full premium,
+    # IOF is a tax on the contribution, not a reduction in premium basis)
     if cert['plan_type'] == 'VGBL':
-        models.update_vgbl_premium_remaining(db, cert_id, net_invest)
+        models.update_vgbl_premium_remaining(db, cert_id, amount)
 
     # Buy fractional fund units per target allocation
     _buy_into_certificate(db, cert_id, net_invest)

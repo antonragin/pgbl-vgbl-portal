@@ -28,8 +28,9 @@ REGRESSIVE_YEAR_BRACKETS = [
     (10, 0.15),   # 8-10 years
 ]
 
-# Progressive IRPF monthly brackets (2026): (up_to, rate, deduction)
-PROGRESSIVE_BRACKETS = [
+# Progressive IRPF monthly brackets (2026 defaults): (up_to, rate, deduction)
+# These are overridden by sim_state config when available
+DEFAULT_PROGRESSIVE_BRACKETS = [
     (2259.20, 0.0, 0.0),
     (2826.65, 0.075, 169.44),
     (3751.05, 0.15, 381.44),
@@ -54,7 +55,7 @@ def regressive_rate(contribution_date, current_date):
         current_date = datetime.strptime(current_date, '%Y-%m-%d')
     for years, rate in REGRESSIVE_YEAR_BRACKETS:
         boundary = contribution_date + relativedelta(years=years)
-        if current_date < boundary:
+        if current_date <= boundary:
             return rate
     return 0.10
 
@@ -70,8 +71,11 @@ def next_bracket_drop(contribution_date, current_date):
         current_date = datetime.strptime(current_date, '%Y-%m-%d')
     for i, (years, rate) in enumerate(REGRESSIVE_YEAR_BRACKETS):
         boundary = contribution_date + relativedelta(years=years)
-        if current_date < boundary:
-            days_until = (boundary - current_date).days
+        if current_date <= boundary:
+            # Drop happens the day after the inclusive boundary
+            from datetime import timedelta
+            drop_date = boundary + timedelta(days=1)
+            days_until = (drop_date - current_date).days
             if i + 1 < len(REGRESSIVE_YEAR_BRACKETS):
                 next_rate = REGRESSIVE_YEAR_BRACKETS[i + 1][1]
             else:
@@ -166,12 +170,25 @@ def calculate_regressive_tax(contributions, withdrawal_amount, plan_type,
     }
 
 
+def _get_progressive_brackets(db=None):
+    """Get progressive brackets from config or defaults."""
+    if db is not None:
+        configured = models.get_progressive_brackets(db)
+        if configured:
+            # Convert stored format to tuples, handling 'inf'
+            return [(float('inf') if b[0] == 'inf' else b[0], b[1], b[2])
+                    for b in configured]
+    return DEFAULT_PROGRESSIVE_BRACKETS
+
+
 def calculate_progressive_tax(withdrawal_amount, plan_type,
-                              current_total_value, vgbl_premium_remaining=0.0):
+                              current_total_value, vgbl_premium_remaining=0.0,
+                              db=None):
     """
     Progressive tax calculation — IRRF antecipação.
     15% withheld at source as advance payment against annual IRPF.
     Uses certificate-level earnings_ratio for VGBL.
+    Brackets are configurable via sim_state.
     """
     if withdrawal_amount <= 0:
         return {'gross': 0, 'taxable_base': 0, 'tax_withheld_15pct': 0,
@@ -192,8 +209,9 @@ def calculate_progressive_tax(withdrawal_amount, plan_type,
     tax_withheld = taxable_base * 0.15
 
     # Estimated final tax using progressive brackets (monthly basis)
+    brackets = _get_progressive_brackets(db)
     estimated_tax = 0
-    for up_to, rate, deduction in PROGRESSIVE_BRACKETS:
+    for up_to, rate, deduction in brackets:
         if taxable_base <= up_to:
             estimated_tax = taxable_base * rate - deduction
             break
@@ -267,7 +285,7 @@ def estimate_tax(db, certificate_id, withdrawal_amount):
 
     if cert['tax_regime'] == 'progressive' or cert['tax_regime'] is None:
         result['progressive'] = calculate_progressive_tax(
-            withdrawal_amount, plan_type, total_value, P_rem
+            withdrawal_amount, plan_type, total_value, P_rem, db=db
         )
 
     return result
@@ -287,8 +305,9 @@ def calculate_iof_vgbl(db, user_id, contribution_amount, year=2026):
     iof_limit, iof_rate = models.get_iof_limit_for_year(db, year)
 
     # Only count source_type='contribution' (exclude transfers/portabilities)
+    # Use gross_amount (pre-IOF) for threshold calculation; fall back to amount for legacy data
     existing = db.execute("""
-        SELECT COALESCE(SUM(co.amount), 0) as total
+        SELECT COALESCE(SUM(COALESCE(co.gross_amount, co.amount)), 0) as total
         FROM contributions co
         JOIN certificates ce ON co.certificate_id = ce.id
         JOIN plans p ON ce.plan_id = p.id

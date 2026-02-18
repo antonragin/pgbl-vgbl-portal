@@ -20,7 +20,16 @@
     </article>
 
     <article>
-        <header>2. Set Fund Allocation (must total 100%)</header>
+        <header>2. Tax Regime (irrevocable)</header>
+        <p>Choose the tax regime for this certificate. This choice <strong>cannot be changed later</strong>.</p>
+        <fieldset>
+            <label><input type="radio" name="tax_regime" value="regressive" checked> <strong>Regressive</strong> &mdash; rates decrease over time (35% to 10% over 10+ years). Best for long-term investors.</label>
+            <label><input type="radio" name="tax_regime" value="progressive"> <strong>Progressive</strong> &mdash; standard IRPF brackets (up to 27.5%). 15% withheld at source. Better for small withdrawals or short-term.</label>
+        </fieldset>
+    </article>
+
+    <article>
+        <header>3. Set Fund Allocation (must total 100%)</header>
         <p>Total: <strong id="alloc-total">0%</strong></p>
         {% for f in funds %}
         <label>
