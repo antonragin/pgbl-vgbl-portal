@@ -2,11 +2,8 @@
 
 Evolves the simulation forward by N months:
 1. Updates all fund NAVs using cyclic returns
-2. Auto-completes pending fund swap requests
-3. Auto-completes pending withdrawal requests
-4. Auto-completes pending contribution requests
-5. Auto-completes pending portability requests
-6. Auto-completes pending brokerage withdrawal requests
+2. Processes ALL pending requests in a single chronological queue
+   (created_date ASC, id ASC), dispatching by type
 """
 
 import calendar
@@ -15,6 +12,15 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import models
 import tax_engine
+
+
+def _verify_cert_ownership(cert, req):
+    """Verify that the certificate belongs to the request user."""
+    if cert['user_id'] != req['user_id']:
+        raise ValueError(
+            f"Certificate #{cert['id']} belongs to user #{cert['user_id']}, "
+            f"but request #{req['id']} is from user #{req['user_id']}"
+        )
 
 
 def evolve_time(db, steps=1):
@@ -45,25 +51,8 @@ def evolve_time(db, steps=1):
                 f"Fund '{fund_name}': NAV {old_nav:.4f} -> {new_nav:.4f} ({ret*100:+.2f}%)"
             )
 
-        # 2. Process pending fund swaps
-        _process_pending_requests(db, 'fund_swap', new_date, step_log)
-
-        # 3. Process pending withdrawals
-        _process_pending_requests(db, 'withdrawal', new_date, step_log)
-
-        # 4. Process pending contributions
-        _process_pending_requests(db, 'contribution', new_date, step_log)
-
-        # 5. Process pending portability
-        _process_pending_requests(db, 'portability_out', new_date, step_log)
-
-        # 6. Process pending brokerage withdrawals
-        _process_pending_requests(db, 'brokerage_withdrawal', new_date, step_log)
-
-        # 7. Process pending transfers
-        _process_pending_requests(db, 'transfer_internal', new_date, step_log)
-        _process_pending_requests(db, 'transfer_external_out', new_date, step_log)
-        _process_pending_requests(db, 'transfer_external_in', new_date, step_log)
+        # 2. Process ALL pending requests in single chronological queue
+        _process_all_pending_requests(db, new_date, step_log)
 
         # Update sim state
         models.set_sim_month(db, new_month)
@@ -94,29 +83,37 @@ def _update_fund_navs(db, month):
     return changes
 
 
-def _process_pending_requests(db, req_type, current_date, step_log):
-    """Process all pending requests of a given type, in chronological order."""
-    pending = models.list_requests(db, status='pending', type_=req_type, order='ASC')
+def _process_all_pending_requests(db, current_date, step_log):
+    """Process ALL pending requests in a single chronological queue (created_date ASC, id ASC).
+    Dispatches each request to the appropriate executor based on its type."""
+    _REQUEST_EXECUTORS = {
+        'fund_swap': _execute_fund_swap,
+        'withdrawal': _execute_withdrawal,
+        'contribution': _execute_contribution,
+        'portability_out': _execute_portability,
+        'brokerage_withdrawal': _execute_brokerage_withdrawal,
+        'transfer_internal': _execute_transfer_internal,
+        'transfer_external_out': _execute_transfer_external_out,
+        'transfer_external_in': _execute_transfer_external_in,
+    }
+    pending = db.execute(
+        "SELECT * FROM requests WHERE status='pending' ORDER BY created_date ASC, id ASC"
+    ).fetchall()
     for req in pending:
+        req_type = req['type']
+        executor = _REQUEST_EXECUTORS.get(req_type)
+        if executor is None:
+            # Unknown or non-executable type (e.g. portability_in handled by portability_out)
+            continue
         try:
             details = json.loads(req['details']) if req['details'] else {}
-            if req_type == 'fund_swap':
-                _execute_fund_swap(db, req, details, current_date, step_log)
-            elif req_type == 'withdrawal':
-                _execute_withdrawal(db, req, details, current_date, step_log)
-            elif req_type == 'contribution':
-                _execute_contribution(db, req, details, current_date, step_log)
-            elif req_type == 'portability_out':
-                _execute_portability(db, req, details, current_date, step_log)
-            elif req_type == 'brokerage_withdrawal':
-                _execute_brokerage_withdrawal(db, req, details, current_date, step_log)
-            elif req_type == 'transfer_internal':
-                _execute_transfer_internal(db, req, details, current_date, step_log)
-            elif req_type == 'transfer_external_out':
-                _execute_transfer_external_out(db, req, details, current_date, step_log)
-            elif req_type == 'transfer_external_in':
-                _execute_transfer_external_in(db, req, details, current_date, step_log)
+            # Atomic execution: savepoint so failures roll back partial mutations
+            db.execute("SAVEPOINT req_exec")
+            executor(db, req, details, current_date, step_log)
+            db.execute("RELEASE req_exec")
         except Exception as e:
+            db.execute("ROLLBACK TO req_exec")
+            db.execute("RELEASE req_exec")
             models.fail_request(db, req['id'])
             step_log['events'].append(
                 f"Request #{req['id']} ({req_type}) FAILED: {e}"
@@ -132,40 +129,44 @@ def _execute_fund_swap(db, req, details, current_date, step_log):
     cert_id = req['certificate_id']
     cert = models.get_certificate(db, cert_id)
     if not cert:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
+        return
+    _verify_cert_ownership(cert, req)
+
+    # Validate and normalize new allocations BEFORE selling
+    new_allocs = details.get('new_allocations', [])
+    if not new_allocs:
+        models.fail_request(db, req['id'], commit=False)
+        step_log['events'].append(f"Fund swap FAILED for certificate #{cert_id}: no allocations provided")
+        return
+    total_pct = sum(a['pct'] for a in new_allocs if a.get('pct', 0) > 0)
+    if total_pct <= 0:
+        models.fail_request(db, req['id'], commit=False)
+        step_log['events'].append(f"Fund swap FAILED for certificate #{cert_id}: allocation total is 0%")
         return
 
-    # Validate allocation sums to 100%
-    new_allocs = details.get('new_allocations', [])
-    total_pct = sum(a.get('pct', 0) for a in new_allocs)
-    if abs(total_pct - 100) > 0.5:
-        models.fail_request(db, req['id'])
-        step_log['events'].append(
-            f"Fund swap FAILED for certificate #{cert_id}: "
-            f"allocation sums to {total_pct}%, must be 100%"
-        )
-        return
+    # Update target allocations first (validates sum=100% or raises)
+    alloc_tuples = [(a['fund_id'], a['pct']) for a in new_allocs]
+    models.set_target_allocations(db, cert_id, alloc_tuples, commit=False)
 
     # Sell all current holdings
     holdings = models.get_holdings(db, cert_id)
     total_cash = 0.0
     for h in holdings:
         total_cash += h['units'] * h['current_nav']
-        models.set_holding(db, cert_id, h['fund_id'], 0)
+        models.set_holding(db, cert_id, h['fund_id'], 0, commit=False)
+
+    # Buy new allocation with fractional units (normalized)
     for alloc in new_allocs:
         fund = models.get_fund(db, alloc['fund_id'])
         if not fund or fund['current_nav'] <= 0:
             continue
-        target_amount = total_cash * (alloc['pct'] / 100.0)
-        units = target_amount / fund['current_nav']  # fractional, no int()
+        target_amount = total_cash * (alloc['pct'] / total_pct)
+        units = target_amount / fund['current_nav']
         if units > 1e-9:
-            models.set_holding(db, cert_id, alloc['fund_id'], units)
+            models.set_holding(db, cert_id, alloc['fund_id'], units, commit=False)
 
-    # Update target allocations
-    alloc_tuples = [(a['fund_id'], a['pct']) for a in new_allocs]
-    models.set_target_allocations(db, cert_id, alloc_tuples)
-
-    models.complete_request(db, req['id'], current_date)
+    models.complete_request(db, req['id'], current_date, commit=False)
     step_log['events'].append(
         f"Fund swap completed for certificate #{cert_id} "
         f"(R${total_cash:,.2f} reallocated, 100% invested)"
@@ -182,18 +183,28 @@ def _execute_withdrawal(db, req, details, current_date, step_log):
     user_id = req['user_id']
     cert = models.get_certificate(db, cert_id)
     if not cert:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         return
+    _verify_cert_ownership(cert, req)
 
     amount = details.get('amount', 0)
     if amount <= 0:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         return
 
-    # Set tax regime if provided and not yet set
-    if cert['tax_regime'] is None and 'tax_regime' in details:
-        models.set_tax_regime(db, cert_id, details['tax_regime'])
-        cert = models.get_certificate(db, cert_id)
+    # Set tax regime from request details (deferred from portal submission)
+    regime_from_request = details.get('tax_regime')
+    if cert['tax_regime'] is None:
+        if regime_from_request in ('progressive', 'regressive'):
+            models.set_tax_regime(db, cert_id, regime_from_request, commit=False)
+            cert = models.get_certificate(db, cert_id)
+        else:
+            models.fail_request(db, req['id'], commit=False)
+            step_log['events'].append(
+                f"Withdrawal FAILED for certificate #{cert_id}: "
+                f"tax regime must be set before first withdrawal"
+            )
+            return
 
     total_value = models.get_certificate_total_value(db, cert_id)
     amount = min(amount, total_value)
@@ -202,34 +213,19 @@ def _execute_withdrawal(db, req, details, current_date, step_log):
     unit_price = models.get_certificate_unit_price(db, cert_id)
     units_to_redeem = amount / unit_price if unit_price > 0 else 0
 
-    # Invariant check: ensure lots exist and are consistent
-    unit_supply = models.get_certificate_unit_supply(db, cert_id)
-    if unit_supply < units_to_redeem - 1e-6:
-        # Try auto-reconcile first
-        models.reconcile_certificate_units(db, cert_id)
-        unit_supply = models.get_certificate_unit_supply(db, cert_id)
-        if unit_supply < units_to_redeem - 1e-6:
-            models.fail_request(db, req['id'])
-            step_log['events'].append(
-                f"Withdrawal FAILED for certificate #{cert_id}: "
-                f"unit supply ({unit_supply:.4f}) < units to redeem ({units_to_redeem:.4f}). "
-                f"Reconcile certificate units first."
-            )
-            return
-
-    # Get VGBL P_rem BEFORE selling (for earnings ratio and lot consumption)
-    P_rem = models.get_vgbl_premium_remaining(db, cert_id)
-
     # Sell fund holdings proportionally to raise the gross amount
     if not _sell_holdings(db, cert_id, amount):
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         step_log['events'].append(
             f"Withdrawal FAILED for certificate #{cert_id}: insufficient funds to raise R${amount:,.2f}"
         )
         return
 
     # Consume lots FIFO by units
-    consumed_lots = models.consume_lots_fifo(db, cert_id, units_to_redeem)
+    consumed_lots = models.consume_lots_fifo(db, cert_id, units_to_redeem, commit=False)
+
+    # Get VGBL P_rem BEFORE updating it (for earnings ratio)
+    P_rem = models.get_vgbl_premium_remaining(db, cert_id)
 
     # Compute per-lot tax using days-based brackets
     current_dt = datetime.strptime(current_date, '%Y-%m-%d')
@@ -292,7 +288,7 @@ def _execute_withdrawal(db, req, details, current_date, step_log):
 
     # Record withdrawal
     withdrawal_id = models.add_withdrawal(db, cert_id, amount, total_tax, net_amount,
-                                          current_date, tax_result)
+                                          current_date, tax_result, commit=False)
 
     # Record lot allocations for audit (days-based)
     def _rate_fn(lot, dh):
@@ -310,22 +306,23 @@ def _execute_withdrawal(db, req, details, current_date, step_log):
         return _taxable_fn(lot, dh) * _rate_fn(lot, dh)
 
     models.record_lot_allocations(db, 'withdrawal', withdrawal_id, consumed_lots,
-                                  current_date, _rate_fn, _taxable_fn, _tax_fn)
+                                  current_date, _rate_fn, _taxable_fn, _tax_fn, commit=False)
 
-    # Update VGBL premium_remaining
+    # Update VGBL premium_remaining (clamp fraction to [0,1] for loss scenarios)
     if cert['plan_type'] == 'VGBL' and total_value > 0:
-        premium_returned = amount * (P_rem / total_value)
-        models.update_vgbl_premium_remaining(db, cert_id, -premium_returned)
+        prem_frac = min(1.0, max(0.0, P_rem / total_value))
+        premium_returned = amount * prem_frac
+        models.update_vgbl_premium_remaining(db, cert_id, -premium_returned, commit=False)
 
     # Update certificate unit supply
-    models.update_certificate_units(db, cert_id, -units_to_redeem)
+    models.update_certificate_units(db, cert_id, -units_to_redeem, commit=False)
 
     # Net goes to brokerage
-    models.add_brokerage_cash(db, user_id, net_amount)
+    models.add_brokerage_cash(db, user_id, net_amount, commit=False)
 
     # Do NOT switch to spending phase (withdrawals allowed in accumulation)
 
-    models.complete_request(db, req['id'], current_date)
+    models.complete_request(db, req['id'], current_date, commit=False)
     step_log['events'].append(
         f"Withdrawal from certificate #{cert_id}: "
         f"gross R${amount:,.2f}, tax R${total_tax:,.2f}, "
@@ -342,25 +339,26 @@ def _execute_contribution(db, req, details, current_date, step_log):
     user_id = req['user_id']
     cert = models.get_certificate(db, cert_id)
     if not cert:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         return
+    _verify_cert_ownership(cert, req)
 
     amount = details.get('amount', 0)
     if amount <= 0:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         return
 
     # Deduct from brokerage
     brokerage_cash = models.get_brokerage_cash(db, user_id)
     if brokerage_cash < amount:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         step_log['events'].append(
             f"Contribution to certificate #{cert_id} FAILED: "
             f"insufficient brokerage cash (R${brokerage_cash:,.2f} < R${amount:,.2f})"
         )
         return
 
-    models.set_brokerage_cash(db, user_id, brokerage_cash - amount)
+    models.set_brokerage_cash(db, user_id, brokerage_cash - amount, commit=False)
 
     # IOF enforcement for VGBL
     iof = 0.0
@@ -371,34 +369,52 @@ def _execute_contribution(db, req, details, current_date, step_log):
         if iof > 0:
             net_invest = amount - iof
 
+    # Guard: net investment must be positive after IOF
+    if net_invest <= 0:
+        # Refund brokerage
+        models.set_brokerage_cash(db, user_id, brokerage_cash, commit=False)
+        models.fail_request(db, req['id'], commit=False)
+        step_log['events'].append(
+            f"Contribution to certificate #{cert_id} FAILED: "
+            f"IOF (R${iof:,.2f}) exceeds contribution amount (R${amount:,.2f})"
+        )
+        return
+
     # Compute certificate unit price and issue units
     unit_price = models.get_certificate_unit_price(db, cert_id)
     units_issued = net_invest / unit_price
 
-    # Record contribution with unit info (gross_amount for IOF tracking)
+    # Record contribution with unit info
     models.add_contribution(db, cert_id, net_invest, current_date,
                             remaining_amount=net_invest,
                             units_total=units_issued, units_remaining=units_issued,
                             issue_unit_price=unit_price,
-                            gross_amount=amount)
+                            gross_amount=amount, iof_amount=iof,
+                            commit=False)
 
     # Update certificate unit supply
-    models.update_certificate_units(db, cert_id, units_issued)
+    models.update_certificate_units(db, cert_id, units_issued, commit=False)
 
-    # Update VGBL premium_remaining (use gross amount — the investor paid the full premium,
-    # IOF is a tax on the contribution, not a reduction in premium basis)
+    # Update VGBL premium_remaining
     if cert['plan_type'] == 'VGBL':
-        models.update_vgbl_premium_remaining(db, cert_id, amount)
+        models.update_vgbl_premium_remaining(db, cert_id, net_invest, commit=False)
 
     # Buy fractional fund units per target allocation
     _buy_into_certificate(db, cert_id, net_invest)
 
-    iof_msg = f", IOF R${iof:,.2f}" if iof > 0 else ""
-    models.complete_request(db, req['id'], current_date)
-    step_log['events'].append(
-        f"Contribution to certificate #{cert_id}: R${amount:,.2f} invested{iof_msg}, "
-        f"{units_issued:.4f} cert units issued at R${unit_price:.4f}/unit"
-    )
+    models.complete_request(db, req['id'], current_date, commit=False)
+    if iof > 0:
+        step_log['events'].append(
+            f"Contribution to certificate #{cert_id}: "
+            f"gross R${amount:,.2f} from brokerage, IOF R${iof:,.2f}, "
+            f"net invested R${net_invest:,.2f}, "
+            f"{units_issued:.4f} units issued at R${unit_price:.4f}/unit"
+        )
+    else:
+        step_log['events'].append(
+            f"Contribution to certificate #{cert_id}: R${amount:,.2f} invested, "
+            f"{units_issued:.4f} cert units issued at R${unit_price:.4f}/unit"
+        )
 
 
 def _execute_portability(db, req, details, current_date, step_log):
@@ -409,18 +425,29 @@ def _execute_portability(db, req, details, current_date, step_log):
     source_cert_id = req['certificate_id']
     dest_cert_id = details.get('destination_cert_id')
     if not dest_cert_id:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         return
 
     source_cert = models.get_certificate(db, source_cert_id)
     dest_cert = models.get_certificate(db, dest_cert_id)
     if not source_cert or not dest_cert:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
+        return
+    _verify_cert_ownership(source_cert, req)
+    _verify_cert_ownership(dest_cert, req)
+
+    # Validate destination has target allocations
+    if not models.get_target_allocations(db, dest_cert_id):
+        models.fail_request(db, req['id'], commit=False)
+        step_log['events'].append(
+            f"Portability #{req['id']} FAILED: destination certificate #{dest_cert_id} "
+            f"has no target allocations set"
+        )
         return
 
     # Validate same type
     if source_cert['plan_type'] != dest_cert['plan_type']:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         step_log['events'].append(
             f"Portability #{req['id']} FAILED: type mismatch "
             f"({source_cert['plan_type']} -> {dest_cert['plan_type']})"
@@ -430,7 +457,7 @@ def _execute_portability(db, req, details, current_date, step_log):
     # Tax regime compatibility
     if (source_cert['tax_regime'] and dest_cert['tax_regime'] and
             source_cert['tax_regime'] != dest_cert['tax_regime']):
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         step_log['events'].append(
             f"Portability #{req['id']} FAILED: tax regime mismatch "
             f"({source_cert['tax_regime']} -> {dest_cert['tax_regime']})"
@@ -439,7 +466,7 @@ def _execute_portability(db, req, details, current_date, step_log):
 
     # Inherit tax regime if needed
     if source_cert['tax_regime'] and not dest_cert['tax_regime']:
-        models.set_tax_regime(db, dest_cert_id, source_cert['tax_regime'])
+        models.set_tax_regime(db, dest_cert_id, source_cert['tax_regime'], commit=False)
 
     # Calculate transfer amount
     source_value = models.get_certificate_total_value(db, source_cert_id)
@@ -452,26 +479,36 @@ def _execute_portability(db, req, details, current_date, step_log):
 
     # Sell source holdings proportionally
     if not _sell_holdings(db, source_cert_id, amount):
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         step_log['events'].append(
             f"Portability FAILED: insufficient funds in certificate #{source_cert_id}"
         )
         return
 
     # Consume lots FIFO at source by units
-    consumed_lots = models.consume_lots_fifo(db, source_cert_id, units_to_transfer)
+    consumed_lots = models.consume_lots_fifo(db, source_cert_id, units_to_transfer, commit=False)
 
     # Record lot allocations for audit
-    models.record_lot_allocations(db, 'portability_out', req['id'], consumed_lots, current_date)
+    models.record_lot_allocations(db, 'portability_out', req['id'], consumed_lots, current_date, commit=False)
 
     # Update source unit supply
-    models.update_certificate_units(db, source_cert_id, -units_to_transfer)
+    models.update_certificate_units(db, source_cert_id, -units_to_transfer, commit=False)
 
     # Compute destination unit price and issue units
     dest_unit_price = models.get_certificate_unit_price(db, dest_cert_id)
     total_dest_units = amount / dest_unit_price if dest_unit_price > 0 else amount
 
+    # Compute VGBL premium_remaining to move BEFORE creating destination lots
+    prem_to_move = 0.0
+    if source_cert['plan_type'] == 'VGBL' and source_value > 1e-9:
+        src_P_rem = models.get_vgbl_premium_remaining(db, source_cert_id)
+        prem_frac = min(1.0, max(0.0, src_P_rem / source_value))
+        prem_to_move = amount * prem_frac
+        models.update_vgbl_premium_remaining(db, source_cert_id, -prem_to_move, commit=False)
+        models.update_vgbl_premium_remaining(db, dest_cert_id, prem_to_move, commit=False)
+
     # Recreate lots at destination with original dates
+    # Use gross transferred value for lot amount; premium basis tracked separately
     total_consumed_units = sum(lot['units_consumed'] for lot in consumed_lots)
     for lot in consumed_lots:
         if total_consumed_units > 1e-9:
@@ -479,24 +516,22 @@ def _execute_portability(db, req, details, current_date, step_log):
         else:
             lot_fraction = 1.0 / max(1, len(consumed_lots))
         dest_lot_units = total_dest_units * lot_fraction
+        dest_lot_gross = amount * lot_fraction  # gross value, not basis
+        if source_cert['plan_type'] == 'VGBL' and prem_to_move > 0:
+            dest_lot_remaining = prem_to_move * lot_fraction
+        else:
+            dest_lot_remaining = lot['consumed_amount']
 
-        models.add_contribution(db, dest_cert_id, lot['consumed_amount'],
+        models.add_contribution(db, dest_cert_id, dest_lot_gross,
                                 lot['contribution_date'],
-                                source_type='transfer_external',
-                                remaining_amount=lot['consumed_amount'],
+                                source_type='portability',
+                                remaining_amount=dest_lot_remaining,
                                 units_total=dest_lot_units,
                                 units_remaining=dest_lot_units,
-                                issue_unit_price=dest_unit_price)
+                                issue_unit_price=dest_unit_price, commit=False)
 
     # Update destination unit supply
-    models.update_certificate_units(db, dest_cert_id, total_dest_units)
-
-    # Move VGBL premium_remaining proportionally
-    if source_cert['plan_type'] == 'VGBL' and source_value > 0:
-        src_P_rem = models.get_vgbl_premium_remaining(db, source_cert_id)
-        prem_to_move = amount * (src_P_rem / source_value)
-        models.update_vgbl_premium_remaining(db, source_cert_id, -prem_to_move)
-        models.update_vgbl_premium_remaining(db, dest_cert_id, prem_to_move)
+    models.update_certificate_units(db, dest_cert_id, total_dest_units, commit=False)
 
     # Buy into destination per its target allocation
     _buy_into_certificate(db, dest_cert_id, amount)
@@ -513,9 +548,9 @@ def _execute_portability(db, req, details, current_date, step_log):
         except (json.JSONDecodeError, TypeError):
             continue
         if ir_details.get('source_cert_id') == source_cert_id:
-            models.complete_request(db, ir['id'], current_date)
+            models.complete_request(db, ir['id'], current_date, commit=False)
 
-    models.complete_request(db, req['id'], current_date)
+    models.complete_request(db, req['id'], current_date, commit=False)
     step_log['events'].append(
         f"Portability: R${amount:,.2f} from certificate #{source_cert_id} "
         f"to #{dest_cert_id} (lots moved FIFO, dates preserved)"
@@ -527,20 +562,20 @@ def _execute_brokerage_withdrawal(db, req, details, current_date, step_log):
     user_id = req['user_id']
     amount = details.get('amount', 0)
     if amount <= 0:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         return
 
     current_cash = models.get_brokerage_cash(db, user_id)
     if current_cash < amount:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         step_log['events'].append(
             f"Brokerage withdrawal FAILED: insufficient cash "
             f"(R${current_cash:,.2f} < R${amount:,.2f})"
         )
         return
 
-    models.set_brokerage_cash(db, user_id, current_cash - amount)
-    models.complete_request(db, req['id'], current_date)
+    models.set_brokerage_cash(db, user_id, current_cash - amount, commit=False)
+    models.complete_request(db, req['id'], current_date, commit=False)
     step_log['events'].append(
         f"Brokerage withdrawal: R${amount:,.2f} removed from user #{user_id}'s account"
     )
@@ -555,7 +590,7 @@ def _sell_holdings(db, cert_id, amount):
     if amount > total_holdings_value * 1.001:  # 0.1% tolerance
         return False
 
-    if total_holdings_value <= 0:
+    if total_holdings_value <= 1e-9:
         return False
 
     # Sell proportionally
@@ -565,7 +600,7 @@ def _sell_holdings(db, cert_id, amount):
             continue
         units_to_sell = h['units'] * sell_fraction
         new_units = h['units'] - units_to_sell
-        models.set_holding(db, cert_id, h['fund_id'], new_units)
+        models.set_holding(db, cert_id, h['fund_id'], new_units, commit=False)
 
     return True
 
@@ -579,11 +614,22 @@ def _execute_transfer_internal(db, req, details, current_date, step_log):
     source = models.get_certificate(db, source_cert_id)
     dest = models.get_certificate(db, dest_cert_id)
     if not source or not dest:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
+        return
+    _verify_cert_ownership(source, req)
+    _verify_cert_ownership(dest, req)
+
+    # Validate destination has target allocations
+    if not models.get_target_allocations(db, dest_cert_id):
+        models.fail_request(db, req['id'], commit=False)
+        step_log['events'].append(
+            f"Internal transfer FAILED: destination certificate #{dest_cert_id} "
+            f"has no target allocations set"
+        )
         return
 
     if source['plan_type'] != dest['plan_type']:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         step_log['events'].append(
             f"Internal transfer FAILED: type mismatch "
             f"({source['plan_type']} -> {dest['plan_type']})"
@@ -593,7 +639,7 @@ def _execute_transfer_internal(db, req, details, current_date, step_log):
     # Tax regime compatibility
     if (source['tax_regime'] and dest['tax_regime'] and
             source['tax_regime'] != dest['tax_regime']):
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         step_log['events'].append(
             f"Internal transfer FAILED: tax regime mismatch "
             f"({source['tax_regime']} -> {dest['tax_regime']})"
@@ -602,12 +648,12 @@ def _execute_transfer_internal(db, req, details, current_date, step_log):
 
     # Inherit tax regime if needed
     if source['tax_regime'] and not dest['tax_regime']:
-        models.set_tax_regime(db, dest_cert_id, source['tax_regime'])
+        models.set_tax_regime(db, dest_cert_id, source['tax_regime'], commit=False)
 
     source_value = models.get_certificate_total_value(db, source_cert_id)
     amount = min(amount, source_value)
     if amount <= 0:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         return
 
     # Compute source unit price and units to transfer
@@ -616,26 +662,37 @@ def _execute_transfer_internal(db, req, details, current_date, step_log):
 
     # Sell source holdings
     if not _sell_holdings(db, source_cert_id, amount):
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         step_log['events'].append(
             f"Internal transfer FAILED: insufficient funds in certificate #{source_cert_id}"
         )
         return
 
     # Consume lots FIFO at source (by units)
-    consumed_lots = models.consume_lots_fifo(db, source_cert_id, units_to_transfer)
+    consumed_lots = models.consume_lots_fifo(db, source_cert_id, units_to_transfer, commit=False)
 
     # Record lot allocations for audit
-    models.record_lot_allocations(db, 'transfer_internal', req['id'], consumed_lots, current_date)
+    models.record_lot_allocations(db, 'transfer_internal', req['id'], consumed_lots, current_date, commit=False)
 
     # Update source unit supply
-    models.update_certificate_units(db, source_cert_id, -units_to_transfer)
+    models.update_certificate_units(db, source_cert_id, -units_to_transfer, commit=False)
 
     # Compute destination unit price and units to issue
     dest_unit_price = models.get_certificate_unit_price(db, dest_cert_id)
     total_dest_units = amount / dest_unit_price if dest_unit_price > 0 else amount
 
+    # Compute VGBL premium_remaining to move BEFORE creating destination lots
+    prem_to_move = 0.0
+    if source['plan_type'] == 'VGBL':
+        src_P_rem = models.get_vgbl_premium_remaining(db, source_cert_id)
+        if source_value > 0:
+            prem_frac = min(1.0, max(0.0, src_P_rem / source_value))
+            prem_to_move = amount * prem_frac
+        models.update_vgbl_premium_remaining(db, source_cert_id, -prem_to_move, commit=False)
+        models.update_vgbl_premium_remaining(db, dest_cert_id, prem_to_move, commit=False)
+
     # Recreate consumed lots at destination with original dates, translated to dest units
+    # Use gross transferred value (not consumed_amount/basis) for lot amount
     total_consumed_units = sum(lot['units_consumed'] for lot in consumed_lots)
     for lot in consumed_lots:
         if total_consumed_units > 1e-9:
@@ -643,33 +700,28 @@ def _execute_transfer_internal(db, req, details, current_date, step_log):
         else:
             lot_fraction = 1.0 / max(1, len(consumed_lots))
         dest_lot_units = total_dest_units * lot_fraction
-        dest_lot_amount = lot['consumed_amount']
+        dest_lot_gross = amount * lot_fraction  # gross value, not basis
+        # For VGBL, remaining_amount tracks premium basis proportionally
+        if source['plan_type'] == 'VGBL' and prem_to_move > 0:
+            dest_lot_remaining = prem_to_move * lot_fraction
+        else:
+            dest_lot_remaining = lot['consumed_amount']
 
-        models.add_contribution(db, dest_cert_id, dest_lot_amount,
+        models.add_contribution(db, dest_cert_id, dest_lot_gross,
                                 lot['contribution_date'],
                                 source_type='transfer_internal',
-                                remaining_amount=dest_lot_amount,
+                                remaining_amount=dest_lot_remaining,
                                 units_total=dest_lot_units,
                                 units_remaining=dest_lot_units,
-                                issue_unit_price=dest_unit_price)
+                                issue_unit_price=dest_unit_price, commit=False)
 
     # Update destination unit supply
-    models.update_certificate_units(db, dest_cert_id, total_dest_units)
-
-    # Move VGBL premium_remaining proportionally
-    if source['plan_type'] == 'VGBL':
-        src_P_rem = models.get_vgbl_premium_remaining(db, source_cert_id)
-        if source_value > 0:
-            prem_to_move = amount * (src_P_rem / source_value)
-        else:
-            prem_to_move = 0
-        models.update_vgbl_premium_remaining(db, source_cert_id, -prem_to_move)
-        models.update_vgbl_premium_remaining(db, dest_cert_id, prem_to_move)
+    models.update_certificate_units(db, dest_cert_id, total_dest_units, commit=False)
 
     # Buy into destination per target allocations
     _buy_into_certificate(db, dest_cert_id, amount)
 
-    models.complete_request(db, req['id'], current_date)
+    models.complete_request(db, req['id'], current_date, commit=False)
     step_log['events'].append(
         f"Internal transfer: R${amount:,.2f} from #{source_cert_id} to #{dest_cert_id} "
         f"(lots moved FIFO, dates preserved, units transferred)"
@@ -684,13 +736,14 @@ def _execute_transfer_external_out(db, req, details, current_date, step_log):
 
     cert = models.get_certificate(db, cert_id)
     if not cert:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         return
+    _verify_cert_ownership(cert, req)
 
     cert_value = models.get_certificate_total_value(db, cert_id)
     amount = min(amount, cert_value)
     if amount <= 0:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         return
 
     # Compute unit price and units to redeem
@@ -698,29 +751,30 @@ def _execute_transfer_external_out(db, req, details, current_date, step_log):
     units_to_redeem = amount / unit_price if unit_price > 0 else 0
 
     if not _sell_holdings(db, cert_id, amount):
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         step_log['events'].append(
             f"External transfer-out FAILED: insufficient funds in certificate #{cert_id}"
         )
         return
 
     # Consume lots FIFO by units
-    consumed_lots = models.consume_lots_fifo(db, cert_id, units_to_redeem)
+    consumed_lots = models.consume_lots_fifo(db, cert_id, units_to_redeem, commit=False)
 
     # Record lot allocations for audit
-    models.record_lot_allocations(db, 'transfer_external_out', req['id'], consumed_lots, current_date)
+    models.record_lot_allocations(db, 'transfer_external_out', req['id'], consumed_lots, current_date, commit=False)
 
     # Update unit supply
-    models.update_certificate_units(db, cert_id, -units_to_redeem)
+    models.update_certificate_units(db, cert_id, -units_to_redeem, commit=False)
 
-    # Reduce VGBL premium_remaining proportionally
-    if cert['plan_type'] == 'VGBL' and cert_value > 0:
+    # Reduce VGBL premium_remaining proportionally (clamp for loss scenarios)
+    if cert['plan_type'] == 'VGBL' and cert_value > 1e-9:
         P_rem = models.get_vgbl_premium_remaining(db, cert_id)
-        premium_returned = amount * (P_rem / cert_value)
-        models.update_vgbl_premium_remaining(db, cert_id, -premium_returned)
+        prem_frac = min(1.0, max(0.0, P_rem / cert_value))
+        premium_returned = amount * prem_frac
+        models.update_vgbl_premium_remaining(db, cert_id, -premium_returned, commit=False)
 
     # Money simply leaves the simulation
-    models.complete_request(db, req['id'], current_date)
+    models.complete_request(db, req['id'], current_date, commit=False)
     step_log['events'].append(
         f"External transfer-out: R${amount:,.2f} from certificate #{cert_id} "
         f"to {dest_institution}"
@@ -736,14 +790,24 @@ def _execute_transfer_external_in(db, req, details, current_date, step_log):
 
     cert = models.get_certificate(db, cert_id)
     if not cert:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         step_log['events'].append(
             f"External transfer-in FAILED: certificate #{cert_id} not valid"
         )
         return
+    _verify_cert_ownership(cert, req)
+
+    # Validate target allocations exist
+    if not models.get_target_allocations(db, cert_id):
+        models.fail_request(db, req['id'], commit=False)
+        step_log['events'].append(
+            f"External transfer-in FAILED: certificate #{cert_id} "
+            f"has no target allocations set"
+        )
+        return
 
     if amount <= 0:
-        models.fail_request(db, req['id'])
+        models.fail_request(db, req['id'], commit=False)
         return
 
     # Get configurable port-in schedule and embedded gain config
@@ -753,6 +817,16 @@ def _execute_transfer_external_in(db, req, details, current_date, step_log):
     # Compute unit price for issuing certificate units
     unit_price = models.get_certificate_unit_price(db, cert_id)
     total_units = amount / unit_price
+
+    # Validate schedule percentages sum to 100%
+    schedule_total_pct = sum(t['pct'] for t in schedule)
+    if abs(schedule_total_pct - 100) > 0.01:
+        models.fail_request(db, req['id'], commit=False)
+        step_log['events'].append(
+            f"External transfer-in FAILED: port-in schedule pct sums to "
+            f"{schedule_total_pct:.1f}% (must be 100%)"
+        )
+        return
 
     # Create backdated lots per schedule with certificate units
     dt = datetime.strptime(current_date, '%Y-%m-%d')
@@ -768,26 +842,31 @@ def _execute_transfer_external_in(db, req, details, current_date, step_log):
         except Exception:
             backdated = dt - timedelta(days=tranche['years_ago'] * 365)
         contrib_date = backdated.strftime('%Y-%m-%d')
+        # For VGBL: remaining_amount = premium basis (not full tranche value)
+        if cert['plan_type'] == 'VGBL':
+            tranche_remaining = tranche_amount * embedded_gain_pct
+        else:
+            tranche_remaining = tranche_amount
         models.add_contribution(db, cert_id, tranche_amount, contrib_date,
                                 source_type='transfer_external',
-                                remaining_amount=tranche_amount,
+                                remaining_amount=tranche_remaining,
                                 units_total=tranche_units,
                                 units_remaining=tranche_units,
-                                issue_unit_price=unit_price)
+                                issue_unit_price=unit_price, commit=False)
         lot_details.append(f"R${tranche_amount:,.2f} dated {contrib_date}")
 
     # Update certificate unit supply
-    models.update_certificate_units(db, cert_id, total_units)
+    models.update_certificate_units(db, cert_id, total_units, commit=False)
 
     # Update VGBL premium_remaining using embedded gain config
     if cert['plan_type'] == 'VGBL':
         premium_basis = amount * embedded_gain_pct
-        models.update_vgbl_premium_remaining(db, cert_id, premium_basis)
+        models.update_vgbl_premium_remaining(db, cert_id, premium_basis, commit=False)
 
     # Buy fractional fund units for full amount
     _buy_into_certificate(db, cert_id, amount)
 
-    models.complete_request(db, req['id'], current_date)
+    models.complete_request(db, req['id'], current_date, commit=False)
     gain_info = f", premium basis: R${amount * embedded_gain_pct:,.2f} ({embedded_gain_pct*100:.0f}%)" if cert['plan_type'] == 'VGBL' else ""
     step_log['events'].append(
         f"External transfer-in: R${amount:,.2f} to certificate #{cert_id} "
@@ -796,13 +875,20 @@ def _execute_transfer_external_in(db, req, details, current_date, step_log):
 
 
 def _buy_into_certificate(db, cert_id, amount):
-    """Buy into a certificate per its target allocations. Fractional units, no cash residual."""
+    """Buy into a certificate per its target allocations. Fractional units, no cash residual.
+    Normalizes allocations to sum to 100% to prevent cash leakage.
+    Raises ValueError if no target allocations are set."""
     target_allocs = models.get_target_allocations(db, cert_id)
     if not target_allocs:
+        raise ValueError(f"Certificate #{cert_id} has no target allocations set")
+
+    # Normalize allocation percentages to sum to 100%
+    total_pct = sum(ta['pct'] for ta in target_allocs)
+    if total_pct <= 0:
         return
 
     for ta in target_allocs:
-        alloc_amount = amount * (ta['pct'] / 100.0)
+        alloc_amount = amount * (ta['pct'] / total_pct)
         fund = models.get_fund(db, ta['fund_id'])
         if not fund or fund['current_nav'] <= 0:
             continue
@@ -813,4 +899,4 @@ def _buy_into_certificate(db, cert_id, amount):
             (cert_id, ta['fund_id'])
         ).fetchone()
         new_units = (existing['units'] if existing else 0) + units
-        models.set_holding(db, cert_id, ta['fund_id'], new_units)
+        models.set_holding(db, cert_id, ta['fund_id'], new_units, commit=False)

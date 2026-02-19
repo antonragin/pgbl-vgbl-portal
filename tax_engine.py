@@ -28,8 +28,8 @@ REGRESSIVE_YEAR_BRACKETS = [
     (10, 0.15),   # 8-10 years
 ]
 
-# Progressive IRPF monthly brackets (2026 defaults): (up_to, rate, deduction)
-# These are overridden by sim_state config when available
+# Progressive IRPF monthly brackets — default 2026 values.
+# Use get_progressive_brackets(db) to load from sim_state when available.
 DEFAULT_PROGRESSIVE_BRACKETS = [
     (2259.20, 0.0, 0.0),
     (2826.65, 0.075, 169.44),
@@ -37,6 +37,26 @@ DEFAULT_PROGRESSIVE_BRACKETS = [
     (4664.68, 0.225, 662.77),
     (float('inf'), 0.275, 896.00),
 ]
+
+
+def get_progressive_brackets(db, year=None):
+    """Load progressive brackets from sim_state if available, else use defaults."""
+    import json
+    if db is not None:
+        key = f'progressive_brackets_{year}' if year else 'progressive_brackets'
+        row = db.execute("SELECT value FROM sim_state WHERE key = ?", (key,)).fetchone()
+        if row:
+            raw = json.loads(row['value'])
+            return [(b['up_to'] if b['up_to'] != 'inf' else float('inf'),
+                     b['rate'], b['deduction']) for b in raw]
+        # Try year-agnostic key
+        if year:
+            row = db.execute("SELECT value FROM sim_state WHERE key = 'progressive_brackets'").fetchone()
+            if row:
+                raw = json.loads(row['value'])
+                return [(b['up_to'] if b['up_to'] != 'inf' else float('inf'),
+                         b['rate'], b['deduction']) for b in raw]
+    return DEFAULT_PROGRESSIVE_BRACKETS
 
 
 def regressive_rate(contribution_date, current_date):
@@ -72,10 +92,7 @@ def next_bracket_drop(contribution_date, current_date):
     for i, (years, rate) in enumerate(REGRESSIVE_YEAR_BRACKETS):
         boundary = contribution_date + relativedelta(years=years)
         if current_date <= boundary:
-            # Drop happens the day after the inclusive boundary
-            from datetime import timedelta
-            drop_date = boundary + timedelta(days=1)
-            days_until = (drop_date - current_date).days
+            days_until = (boundary - current_date).days
             if i + 1 < len(REGRESSIVE_YEAR_BRACKETS):
                 next_rate = REGRESSIVE_YEAR_BRACKETS[i + 1][1]
             else:
@@ -83,7 +100,7 @@ def next_bracket_drop(contribution_date, current_date):
             return {
                 'rate': next_rate,
                 'days_until': days_until,
-                'months_until': max(1, days_until // 30),
+                'months_until': max(0, (days_until + 29) // 30),
             }
     return None  # Already at minimum 10%
 
@@ -104,6 +121,9 @@ def calculate_regressive_tax(contributions, withdrawal_amount, plan_type,
         vgbl_premium_remaining: certificate-level P_rem for VGBL
         current_date: 'YYYY-MM-DD' string for calendar-year bracket lookups
     """
+    if current_date is None:
+        raise ValueError("current_date is required for calculate_regressive_tax")
+
     if current_total_value <= 0 or withdrawal_amount <= 0:
         return {'gross': 0, 'tax': 0, 'net': 0, 'effective_rate': 0, 'breakdown': []}
 
@@ -136,7 +156,7 @@ def calculate_regressive_tax(contributions, withdrawal_amount, plan_type,
 
         lot_gross_value = consumed_units * unit_price
         contrib_date = contrib.get('contribution_date') or contrib.get('date', '')
-        rate = regressive_rate(contrib_date, current_date) if current_date else regressive_rate(contrib_date, datetime.now().strftime('%Y-%m-%d'))
+        rate = regressive_rate(contrib_date, current_date)
         days_held = contrib.get('days_held', 0)
 
         if plan_type == 'PGBL':
@@ -170,25 +190,14 @@ def calculate_regressive_tax(contributions, withdrawal_amount, plan_type,
     }
 
 
-def _get_progressive_brackets(db=None):
-    """Get progressive brackets from config or defaults."""
-    if db is not None:
-        configured = models.get_progressive_brackets(db)
-        if configured:
-            # Convert stored format to tuples, handling 'inf'
-            return [(float('inf') if b[0] == 'inf' else b[0], b[1], b[2])
-                    for b in configured]
-    return DEFAULT_PROGRESSIVE_BRACKETS
-
-
 def calculate_progressive_tax(withdrawal_amount, plan_type,
                               current_total_value, vgbl_premium_remaining=0.0,
-                              db=None):
+                              db=None, year=None):
     """
     Progressive tax calculation — IRRF antecipação.
     15% withheld at source as advance payment against annual IRPF.
     Uses certificate-level earnings_ratio for VGBL.
-    Brackets are configurable via sim_state.
+    Loads progressive brackets from sim_state if db is provided.
     """
     if withdrawal_amount <= 0:
         return {'gross': 0, 'taxable_base': 0, 'tax_withheld_15pct': 0,
@@ -209,7 +218,7 @@ def calculate_progressive_tax(withdrawal_amount, plan_type,
     tax_withheld = taxable_base * 0.15
 
     # Estimated final tax using progressive brackets (monthly basis)
-    brackets = _get_progressive_brackets(db)
+    brackets = get_progressive_brackets(db, year)
     estimated_tax = 0
     for up_to, rate, deduction in brackets:
         if taxable_base <= up_to:
@@ -284,8 +293,10 @@ def estimate_tax(db, certificate_id, withdrawal_amount):
         )
 
     if cert['tax_regime'] == 'progressive' or cert['tax_regime'] is None:
+        sim_year = int(sim_date[:4]) if sim_date else None
         result['progressive'] = calculate_progressive_tax(
-            withdrawal_amount, plan_type, total_value, P_rem, db=db
+            withdrawal_amount, plan_type, total_value, P_rem,
+            db=db, year=sim_year
         )
 
     return result
@@ -305,7 +316,7 @@ def calculate_iof_vgbl(db, user_id, contribution_amount, year=2026):
     iof_limit, iof_rate = models.get_iof_limit_for_year(db, year)
 
     # Only count source_type='contribution' (exclude transfers/portabilities)
-    # Use gross_amount (pre-IOF) for threshold calculation; fall back to amount for legacy data
+    # Use gross_amount (pre-IOF) for threshold calculation; fallback to amount for old rows
     existing = db.execute("""
         SELECT COALESCE(SUM(COALESCE(co.gross_amount, co.amount)), 0) as total
         FROM contributions co

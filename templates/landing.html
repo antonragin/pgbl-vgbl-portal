@@ -11,12 +11,12 @@
     <article>
         <header>Investor Portal</header>
         <p>Client-facing interface: browse plans, create certificates, contribute, withdraw, switch funds, and manage your pension investments.</p>
-        <a href="{{ url_for('portal.login') }}" role="button">Open Portal</a>
+        <a href="/portal/" role="button">Open Portal</a>
     </article>
     <article>
         <header>Admin / Sim-Backend</header>
         <p>Simulation control panel: manage users, plans, funds, configure certificates, inject cash, and evolve simulation time.</p>
-        <a href="{{ url_for('admin.dashboard') }}" role="button" class="secondary">Open Admin</a>
+        <a href="/admin/" role="button" class="secondary">Open Admin</a>
     </article>
 </div>
 {% endblock %}

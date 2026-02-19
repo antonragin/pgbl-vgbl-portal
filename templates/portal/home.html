@@ -44,9 +44,6 @@
             <p>Value: <strong>R${{ "%.2f"|format(cd.total_value) }}</strong></p>
             <p>Contributed: R${{ "%.2f"|format(cd.total_contribs) }}</p>
             <p>Gain/Loss: <span style="color:{{ '#4CAF50' if cd.gain >= 0 else '#f44336' }}">R${{ "%.2f"|format(cd.gain) }}</span></p>
-            {% if cd.taxable_earnings is not none %}
-            <p><small>Premium basis: R${{ "%.2f"|format(cd.P_rem) }} | Taxable earnings: <strong>R${{ "%.2f"|format(cd.taxable_earnings) }}</strong></small></p>
-            {% endif %}
         </div>
         <div>
             {% if cd.holdings %}

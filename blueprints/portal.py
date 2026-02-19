@@ -75,23 +75,20 @@ def home():
         total_val = models.get_certificate_total_value(db, c['id'])
         holdings = models.get_holdings(db, c['id'])
         total_contribs = models.total_contributions(db, c['id'])
-        gain = total_val - total_contribs
-        P_rem = models.get_vgbl_premium_remaining(db, c['id'])
-        # VGBL taxable earnings = total_value - premium_remaining
-        if c['plan_type'] == 'VGBL' and total_val > 0:
-            taxable_earnings = max(0, total_val - P_rem)
-        else:
-            taxable_earnings = None
+        # Use total_invested_basis (all sources) for accurate gain calculation
+        invested_basis = models.total_invested_basis(db, c['id'])
+        gain = total_val - invested_basis
         cert_data.append({
             'cert': c, 'total_value': total_val, 'holdings': holdings,
-            'total_contribs': total_contribs, 'gain': gain,
-            'P_rem': P_rem, 'taxable_earnings': taxable_earnings,
+            'total_contribs': total_contribs, 'invested_basis': invested_basis,
+            'gain': gain,
         })
 
     total_invested = sum(cd['total_value'] for cd in cert_data)
+    total_basis = sum(cd['invested_basis'] for cd in cert_data)
     total_contributed = sum(cd['total_contribs'] for cd in cert_data)
-    total_gain = total_invested - total_contributed
-    overall_return_pct = (total_gain / total_contributed * 100) if total_contributed > 0 else 0
+    total_gain = total_invested - total_basis
+    overall_return_pct = (total_gain / total_basis * 100) if total_basis > 0 else 0
     pending = models.list_requests(db, user_id=user_id, status='pending')
 
     return render_template('portal/home.html',
@@ -189,21 +186,23 @@ def new_certificate():
             flash('Invalid plan.', 'error')
             return redirect(url_for('portal.new_certificate'))
 
-        sim_date = models.get_sim_date(db)
-        cert_id = models.create_certificate(db, user_id, plan_id, sim_date)
-
-        # Set tax regime at creation (irrevocable)
-        tax_regime = request.form.get('tax_regime')
-        if tax_regime in ('progressive', 'regressive'):
-            models.set_tax_regime(db, cert_id, tax_regime)
-
-        # Set target allocations from form
+        # Collect and validate allocations BEFORE creating the certificate
         funds = models.list_funds(db)
         allocs = []
         for f in funds:
             pct = safe_float(request.form.get(f'alloc_{f["id"]}'))
             if pct > 0:
                 allocs.append((f['id'], pct))
+        if allocs:
+            total_pct = sum(pct for _, pct in allocs)
+            if abs(total_pct - 100) > 0.01:
+                flash(f'Allocation must sum to 100% (got {total_pct:.2f}%).', 'error')
+                return redirect(url_for('portal.new_certificate'))
+
+        sim_date = models.get_sim_date(db)
+        cert_id = models.create_certificate(db, user_id, plan_id, sim_date)
+
+        # Set target allocations from form
         if allocs:
             models.set_target_allocations(db, cert_id, allocs)
 
@@ -282,13 +281,15 @@ def certificate_detail(cert_id):
             'lot_earnings': lot_earnings,
         })
 
+    invested_basis = models.total_invested_basis(db, cert_id)
     return render_template('portal/certificate.html',
                            cert=cert, holdings=holdings,
                            contributions=contributions, withdrawals=withdrawals,
                            total_value=total_value, total_contribs=total_contribs,
+                           invested_basis=invested_basis,
                            total_remaining=total_remaining,
                            target_allocs=target_allocs, requests=cert_requests,
-                           gain=total_value - total_contribs,
+                           gain=total_value - invested_basis,
                            contrib_aging=contrib_aging,
                            plan_type=cert['plan_type'],
                            unit_price=unit_price, unit_supply=unit_supply,
@@ -311,6 +312,13 @@ def contribute(cert_id):
     brokerage_cash = models.get_brokerage_cash(db, session['user_id'])
 
     if request.method == 'POST':
+        # Check target allocations exist before accepting contribution
+        target_allocs = models.get_target_allocations(db, cert_id)
+        if not target_allocs:
+            flash('Cannot contribute: no target allocations set for this certificate. '
+                  'Please set allocations first via Switch Funds.', 'error')
+            return redirect(url_for('portal.certificate_detail', cert_id=cert_id))
+
         amount = safe_float(request.form.get('amount'))
         if amount <= 0:
             flash('Amount must be positive.', 'error')
@@ -326,12 +334,13 @@ def contribute(cert_id):
 
             sim_date = models.get_sim_date(db)
             models.create_request(db, session['user_id'], cert_id,
-                                  'contribution', {'amount': amount, 'iof': iof},
+                                  'contribution',
+                                  {'amount': amount, 'iof_estimated': iof},
                                   sim_date)
             msg = f'Contribution of R${amount:,.2f} submitted (pending next time evolution).'
             if iof > 0:
                 net = amount - iof
-                msg += f' Estimated IOF: R${iof:,.2f} (est. net invested: R${net:,.2f}). Final IOF calculated at execution.'
+                msg += f' Estimated IOF: R${iof:,.2f} (est. net: R${net:,.2f})'
             flash(msg, 'success')
             return redirect(url_for('portal.certificate_detail', cert_id=cert_id))
 
@@ -343,7 +352,7 @@ def contribute(cert_id):
         sim_date = models.get_sim_date(db)
         year = int(sim_date[:4])
         iof_limit, iof_rate = models.get_iof_limit_for_year(db, year)
-        # Only count source_type='contribution' for IOF base (use gross_amount for accuracy)
+        # Only count source_type='contribution' for IOF base (use gross_amount for pre-IOF total)
         existing_vgbl = db.execute("""
             SELECT COALESCE(SUM(COALESCE(co.gross_amount, co.amount)), 0) as total
             FROM contributions co
@@ -383,18 +392,14 @@ def withdraw(cert_id):
     total_value = models.get_certificate_total_value(db, cert_id)
 
     if request.method == 'POST':
-        # Handle tax regime selection (should have been set at creation, but allow fallback)
+        # Handle tax regime selection (validate but defer persistence to execution)
         if cert['tax_regime'] is None:
             regime = request.form.get('tax_regime')
             if regime not in ('progressive', 'regressive'):
-                flash('You must select a tax regime before withdrawing. '
-                      'This should have been set when you created the certificate.', 'error')
+                flash('You must select a tax regime before withdrawing.', 'error')
                 return redirect(url_for('portal.withdraw', cert_id=cert_id))
-            if not models.set_tax_regime(db, cert_id, regime):
-                flash('Tax regime is already set and cannot be changed.', 'error')
-                return redirect(url_for('portal.withdraw', cert_id=cert_id))
-            cert = models.get_certificate(db, cert_id)
-            flash(f'Tax regime set to {regime}. This choice is IRREVOCABLE.', 'warning')
+        else:
+            regime = cert['tax_regime']
 
         amount = safe_float(request.form.get('amount'))
         if amount <= 0 or amount > total_value:
@@ -404,10 +409,10 @@ def withdraw(cert_id):
         sim_date = models.get_sim_date(db)
         models.create_request(db, session['user_id'], cert_id,
                               'withdrawal',
-                              {'amount': amount, 'tax_regime': cert['tax_regime']},
+                              {'amount': amount, 'tax_regime': regime},
                               sim_date)
         flash(f'Withdrawal of R${amount:,.2f} submitted (pending next time evolution). '
-              'Tax regime is now locked irrevocably.', 'success')
+              f'Tax regime ({regime}) will be locked irrevocably on execution.', 'success')
         return redirect(url_for('portal.certificate_detail', cert_id=cert_id))
 
     total_contribs = models.total_contributions(db, cert_id)
@@ -495,7 +500,17 @@ def switch_funds(cert_id):
 
 
 # ---------------------------------------------------------------------------
-# Transfers & Portability
+# Portability (legacy redirect)
+# ---------------------------------------------------------------------------
+
+@portal_bp.route('/certificates/<int:cert_id>/portability')
+@login_required
+def portability(cert_id):
+    return redirect(url_for('portal.transfers'))
+
+
+# ---------------------------------------------------------------------------
+# Transfers
 # ---------------------------------------------------------------------------
 
 @portal_bp.route('/transfers', methods=['GET', 'POST'])
@@ -539,6 +554,9 @@ def transfers():
                       f'Regimes must match or destination must not have a regime set.', 'error')
             elif amount <= 0 or amount > cert_values.get(source_id, 0):
                 flash(f'Invalid amount. Maximum: R${cert_values.get(source_id, 0):,.2f}', 'error')
+            elif not models.get_target_allocations(db, dest_id):
+                flash(f'Destination certificate #{dest_id} has no target allocations set. '
+                      f'Please set allocations on the destination before transferring.', 'error')
             else:
                 models.create_request(db, user_id, source_id, 'transfer_internal',
                                       {'destination_cert_id': dest_id, 'amount': amount},
@@ -577,6 +595,9 @@ def transfers():
                 flash('Please specify the source institution.', 'error')
             elif amount <= 0:
                 flash('Amount must be positive.', 'error')
+            elif not models.get_target_allocations(db, dest_id):
+                flash(f'Destination certificate #{dest_id} has no target allocations set. '
+                      f'Please set allocations on the destination before transferring.', 'error')
             else:
                 models.create_request(db, user_id, dest_id, 'transfer_external_in',
                                       {'source_institution': source_institution, 'amount': amount},
@@ -623,7 +644,7 @@ def iof_declaration():
     current_declaration = models.get_iof_declaration(db, user_id, year)
     iof_limit, iof_rate = models.get_iof_limit_for_year(db, year)
 
-    # Get internal VGBL contributions this year (use gross_amount for IOF accuracy)
+    # Get internal VGBL contributions this year (use gross_amount for pre-IOF total)
     internal_vgbl = db.execute("""
         SELECT COALESCE(SUM(COALESCE(co.gross_amount, co.amount)), 0) as total
         FROM contributions co

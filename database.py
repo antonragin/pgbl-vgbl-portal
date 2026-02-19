@@ -58,11 +58,12 @@ CREATE TABLE IF NOT EXISTS contributions (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     certificate_id      INTEGER NOT NULL REFERENCES certificates(id) ON DELETE CASCADE,
     amount              REAL NOT NULL,
-    gross_amount        REAL,
     remaining_amount    REAL NOT NULL,
     contribution_date   TEXT NOT NULL,
     source_type         TEXT NOT NULL DEFAULT 'contribution'
-                        CHECK(source_type IN ('contribution', 'transfer_internal', 'transfer_external')),
+                        CHECK(source_type IN ('contribution', 'transfer_internal', 'transfer_external', 'portability')),
+    gross_amount        REAL,
+    iof_amount          REAL NOT NULL DEFAULT 0.0,
     units_total         REAL NOT NULL DEFAULT 0.0,
     units_remaining     REAL NOT NULL DEFAULT 0.0,
     issue_unit_price    REAL NOT NULL DEFAULT 0.0,
@@ -272,6 +273,15 @@ def upgrade_schema(db):
         db.execute("ALTER TABLE certificates ADD COLUMN vgbl_premium_remaining REAL NOT NULL DEFAULT 0.0")
         db.commit()
 
+    # --- Contributions: add gross_amount and iof_amount if missing ---
+    contrib_cols = [r[1] for r in db.execute("PRAGMA table_info(contributions)").fetchall()]
+    if 'gross_amount' not in contrib_cols:
+        db.execute("ALTER TABLE contributions ADD COLUMN gross_amount REAL")
+        db.commit()
+    if 'iof_amount' not in contrib_cols:
+        db.execute("ALTER TABLE contributions ADD COLUMN iof_amount REAL NOT NULL DEFAULT 0.0")
+        db.commit()
+
     # --- Contributions: add unit columns if missing ---
     contrib_cols = [r[1] for r in db.execute("PRAGMA table_info(contributions)").fetchall()]
     if 'units_total' not in contrib_cols:
@@ -282,11 +292,6 @@ def upgrade_schema(db):
         db.commit()
     if 'issue_unit_price' not in contrib_cols:
         db.execute("ALTER TABLE contributions ADD COLUMN issue_unit_price REAL NOT NULL DEFAULT 0.0")
-        db.commit()
-    if 'gross_amount' not in contrib_cols:
-        db.execute("ALTER TABLE contributions ADD COLUMN gross_amount REAL")
-        # Backfill: for existing contributions, gross_amount = amount (no IOF retroactively)
-        db.execute("UPDATE contributions SET gross_amount = amount WHERE gross_amount IS NULL AND source_type = 'contribution'")
         db.commit()
 
     # --- lot_allocations: add days_held if missing ---
@@ -301,19 +306,31 @@ def upgrade_schema(db):
         db.execute("ALTER TABLE requests ADD COLUMN rejected_reason TEXT")
         db.commit()
 
+    # Check if the requests table CHECK constraint includes all required types/statuses
+    # by parsing the CREATE TABLE SQL from sqlite_master (avoids FK issues from probe inserts)
     needs_recreate = False
-    try:
-        db.execute("SAVEPOINT check_schema")
-        db.execute(
-            "INSERT INTO requests (user_id, type, status, created_date) "
-            "VALUES (0, 'transfer_internal', 'rejected', '2000-01-01')"
-        )
-        db.execute("ROLLBACK TO check_schema")
-    except sqlite3.IntegrityError:
-        db.execute("ROLLBACK TO check_schema")
-        needs_recreate = True
-    finally:
-        db.execute("RELEASE check_schema")
+    row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='requests'"
+    ).fetchone()
+    if row and row[0]:
+        create_sql = row[0]
+        required_types = [
+            'fund_swap', 'withdrawal', 'contribution',
+            'portability_out', 'portability_in',
+            'brokerage_withdrawal',
+            'transfer_internal', 'transfer_external_out',
+            'transfer_external_in',
+        ]
+        required_statuses = ['pending', 'completed', 'failed', 'rejected', 'cancelled']
+        for t in required_types:
+            if t not in create_sql:
+                needs_recreate = True
+                break
+        if not needs_recreate:
+            for s in required_statuses:
+                if s not in create_sql:
+                    needs_recreate = True
+                    break
 
     if needs_recreate:
         db.execute("ALTER TABLE requests RENAME TO requests_old")
@@ -349,4 +366,61 @@ def upgrade_schema(db):
             FROM requests_old
         """)
         db.execute("DROP TABLE requests_old")
+        db.commit()
+
+    # --- Contributions: ensure CHECK constraint includes 'portability' ---
+    needs_contrib_recreate = False
+    contrib_row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='contributions'"
+    ).fetchone()
+    if contrib_row and contrib_row[0]:
+        contrib_create_sql = contrib_row[0]
+        if 'portability' not in contrib_create_sql:
+            needs_contrib_recreate = True
+
+    if needs_contrib_recreate:
+        db.execute("ALTER TABLE contributions RENAME TO contributions_old")
+        db.executescript("""
+            CREATE TABLE contributions (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                certificate_id      INTEGER NOT NULL REFERENCES certificates(id) ON DELETE CASCADE,
+                amount              REAL NOT NULL,
+                remaining_amount    REAL NOT NULL,
+                contribution_date   TEXT NOT NULL,
+                source_type         TEXT NOT NULL DEFAULT 'contribution'
+                                    CHECK(source_type IN ('contribution', 'transfer_internal', 'transfer_external', 'portability')),
+                gross_amount        REAL,
+                iof_amount          REAL NOT NULL DEFAULT 0.0,
+                units_total         REAL NOT NULL DEFAULT 0.0,
+                units_remaining     REAL NOT NULL DEFAULT 0.0,
+                issue_unit_price    REAL NOT NULL DEFAULT 0.0,
+                created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        """)
+        # Copy data; old table may not have gross_amount/iof_amount columns
+        old_cols = [r[1] for r in db.execute("PRAGMA table_info(contributions_old)").fetchall()]
+        if 'gross_amount' in old_cols:
+            db.execute("""
+                INSERT INTO contributions (id, certificate_id, amount, remaining_amount,
+                    contribution_date, source_type, gross_amount, iof_amount,
+                    units_total, units_remaining, issue_unit_price, created_at)
+                SELECT id, certificate_id, amount, remaining_amount,
+                    contribution_date, source_type,
+                    gross_amount, COALESCE(iof_amount, 0.0),
+                    COALESCE(units_total, 0.0), COALESCE(units_remaining, 0.0),
+                    COALESCE(issue_unit_price, 0.0), created_at
+                FROM contributions_old
+            """)
+        else:
+            db.execute("""
+                INSERT INTO contributions (id, certificate_id, amount, remaining_amount,
+                    contribution_date, source_type,
+                    units_total, units_remaining, issue_unit_price, created_at)
+                SELECT id, certificate_id, amount, remaining_amount,
+                    contribution_date, source_type,
+                    COALESCE(units_total, 0.0), COALESCE(units_remaining, 0.0),
+                    COALESCE(issue_unit_price, 0.0), created_at
+                FROM contributions_old
+            """)
+        db.execute("DROP TABLE contributions_old")
         db.commit()

@@ -299,17 +299,24 @@ def edit_certificate(user_id, cert_id):
             amount = safe_float(request.form.get('amount'))
             date = request.form.get('date', models.get_sim_date(db))
             if amount > 0:
-                unit_price = models.get_certificate_unit_price(db, cert_id)
-                units_issued = amount / unit_price
-                models.add_contribution(db, cert_id, amount, date,
-                                        remaining_amount=amount,
-                                        units_total=units_issued,
-                                        units_remaining=units_issued,
-                                        issue_unit_price=unit_price)
-                models.update_certificate_units(db, cert_id, units_issued)
-                if cert['plan_type'] == 'VGBL':
-                    models.update_vgbl_premium_remaining(db, cert_id, amount)
-                flash(f'Contribution of R${amount:,.2f} added ({units_issued:.4f} units at R${unit_price:.6f}).', 'success')
+                target_allocs = models.get_target_allocations(db, cert_id)
+                if not target_allocs:
+                    flash('Cannot add contribution: no target allocations set for this certificate.', 'error')
+                else:
+                    unit_price = models.get_certificate_unit_price(db, cert_id)
+                    units_issued = amount / unit_price
+                    models.add_contribution(db, cert_id, amount, date,
+                                            remaining_amount=amount,
+                                            units_total=units_issued,
+                                            units_remaining=units_issued,
+                                            issue_unit_price=unit_price)
+                    models.update_certificate_units(db, cert_id, units_issued)
+                    if cert['plan_type'] == 'VGBL':
+                        models.update_vgbl_premium_remaining(db, cert_id, amount)
+                    # Also buy fund holdings to maintain unit_price invariant
+                    time_engine._buy_into_certificate(db, cert_id, amount)
+                    db.commit()  # _buy_into_certificate uses commit=False; must persist holdings
+                    flash(f'Contribution of R${amount:,.2f} added ({units_issued:.4f} units at R${unit_price:.6f}).', 'success')
 
         elif action == 'set_holding':
             fund_id = int(request.form.get('fund_id', 0))
@@ -327,8 +334,8 @@ def edit_certificate(user_id, cert_id):
         elif action == 'set_regime':
             regime = request.form.get('tax_regime')
             if regime in ('progressive', 'regressive'):
-                models.set_tax_regime(db, cert_id, regime, force=True)
-                flash(f'Tax regime set to {regime} (admin override).', 'success')
+                models.set_tax_regime(db, cert_id, regime)
+                flash(f'Tax regime set to {regime}.', 'success')
 
         elif action == 'add_withdrawal':
             gross = safe_float(request.form.get('gross_amount'))
@@ -337,7 +344,9 @@ def edit_certificate(user_id, cert_id):
             if gross > 0:
                 net = gross - tax
                 models.add_withdrawal(db, cert_id, gross, tax, net, date)
-                flash(f'Withdrawal of R${gross:,.2f} recorded.', 'success')
+                flash(f'Withdrawal of R${gross:,.2f} recorded (manual entry only — '
+                      f'does NOT execute FIFO lot consumption, sell holdings, or update '
+                      f'unit_supply/P_rem. Use portal withdrawal for full mechanics).', 'warning')
 
         elif action == 'reconcile_units':
             old_supply, new_supply = models.reconcile_certificate_units(db, cert_id)
@@ -371,11 +380,13 @@ def edit_certificate(user_id, cert_id):
         "ORDER BY id DESC", (cert_id,)
     ).fetchall()
 
+    invested_basis = models.total_invested_basis(db, cert_id)
     return render_template('admin/certificate_detail.html',
                            user_id=user_id, cert=cert,
                            holdings=holdings, contributions=contributions,
                            withdrawals=withdrawals, total_value=total_value,
                            total_contribs=total_contribs,
+                           invested_basis=invested_basis,
                            total_remaining=total_remaining,
                            funds=all_funds,
                            requests=cert_requests, target_allocs=target_allocs,
@@ -425,46 +436,6 @@ def reject_request(req_id):
 # ---------------------------------------------------------------------------
 # Time Control
 # ---------------------------------------------------------------------------
-
-@admin_bp.route('/tax-config', methods=['GET', 'POST'])
-def tax_config():
-    db = g.db
-    if request.method == 'POST':
-        action = request.form.get('action')
-        if action == 'set_progressive_brackets':
-            brackets = []
-            for i in range(5):
-                up_to = request.form.get(f'bracket_{i}_up_to', '').strip()
-                rate = safe_float(request.form.get(f'bracket_{i}_rate'))
-                deduction = safe_float(request.form.get(f'bracket_{i}_deduction'))
-                if up_to:
-                    up_to_val = 'inf' if up_to.lower() == 'inf' else safe_float(up_to)
-                    brackets.append([up_to_val, rate, deduction])
-            if brackets:
-                models.set_progressive_brackets(db, brackets)
-                flash(f'Progressive brackets updated ({len(brackets)} brackets).', 'success')
-            else:
-                flash('No valid brackets provided.', 'error')
-        elif action == 'reset_progressive_brackets':
-            db.execute("DELETE FROM sim_state WHERE key = 'progressive_brackets'")
-            db.commit()
-            flash('Progressive brackets reset to defaults.', 'success')
-        return redirect(url_for('admin.tax_config'))
-
-    import tax_engine
-    current_brackets = models.get_progressive_brackets(db)
-    if current_brackets is None:
-        current_brackets = [[b[0] if b[0] != float('inf') else 'inf', b[1], b[2]]
-                            for b in tax_engine.DEFAULT_PROGRESSIVE_BRACKETS]
-        is_default = True
-    else:
-        is_default = False
-
-    iof_config = models.get_iof_config(db)
-    return render_template('admin/tax_config.html',
-                           brackets=current_brackets, is_default=is_default,
-                           iof_config=iof_config)
-
 
 @admin_bp.route('/time/evolve', methods=['POST'])
 def evolve_time():

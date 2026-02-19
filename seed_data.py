@@ -157,8 +157,10 @@ def seed():
 
         # Maria: sample external transfer-in contribution
         # External port-in: embedded_gain_pct = 0.80, so P_rem for this = 75000 * 0.80 = 60000
+        # remaining_amount = premium basis = 75000 * 0.80 = 60000
         models.add_contribution(db, c3, 75000.0, '2025-06-01',
                                 source_type='transfer_external',
+                                remaining_amount=75000.0 * 0.80,
                                 units_total=75000.0, units_remaining=75000.0,
                                 issue_unit_price=1.0)
         _init_certificate_units(db, c3, 'VGBL', external_transfer_amounts=[75000.0])

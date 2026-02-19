@@ -8,32 +8,36 @@ import os
 # Users
 # ---------------------------------------------------------------------------
 
-def create_user(db, username, is_retail=True):
+def create_user(db, username, is_retail=True, commit=True):
     cur = db.execute(
         "INSERT INTO users (username, is_retail) VALUES (?, ?)",
         (username, int(is_retail))
     )
-    db.commit()
+    if commit:
+        db.commit()
     # Ensure brokerage account exists
     db.execute(
         "INSERT OR IGNORE INTO brokerage_accounts (user_id, cash) VALUES (?, 0.0)",
         (cur.lastrowid,)
     )
-    db.commit()
+    if commit:
+        db.commit()
     return cur.lastrowid
 
 
-def delete_user(db, user_id):
+def delete_user(db, user_id, commit=True):
     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
-    db.commit()
+    if commit:
+        db.commit()
 
 
-def update_user(db, user_id, username, is_retail=True):
+def update_user(db, user_id, username, is_retail=True, commit=True):
     db.execute(
         "UPDATE users SET username = ?, is_retail = ? WHERE id = ?",
         (username, int(is_retail), user_id)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_user(db, user_id):
@@ -52,26 +56,29 @@ def list_users(db):
 # Plans
 # ---------------------------------------------------------------------------
 
-def create_plan(db, type_, name, fees_info=None, plan_code=None):
+def create_plan(db, type_, name, fees_info=None, plan_code=None, commit=True):
     cur = db.execute(
         "INSERT INTO plans (type, name, fees_info, plan_code) VALUES (?, ?, ?, ?)",
         (type_, name, fees_info, plan_code)
     )
-    db.commit()
+    if commit:
+        db.commit()
     return cur.lastrowid
 
 
-def delete_plan(db, plan_id):
+def delete_plan(db, plan_id, commit=True):
     db.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
-    db.commit()
+    if commit:
+        db.commit()
 
 
-def update_plan(db, plan_id, name, type_=None, fees_info=None, plan_code=None):
+def update_plan(db, plan_id, name, type_=None, fees_info=None, plan_code=None, commit=True):
     db.execute(
         "UPDATE plans SET name = ?, type = COALESCE(?, type), fees_info = ?, plan_code = ? WHERE id = ?",
         (name, type_, fees_info, plan_code, plan_id)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_plan(db, plan_id):
@@ -91,7 +98,7 @@ def list_plans(db, type_filter=None):
 # ---------------------------------------------------------------------------
 
 def create_fund(db, name, description=None, cnpj=None, is_qualified_only=False,
-                initial_nav=1.0, returns_csv=None):
+                initial_nav=1.0, returns_csv=None, commit=True):
     cur = db.execute(
         """INSERT INTO funds (name, description, cnpj, is_qualified_only,
            initial_nav, current_nav, returns_csv)
@@ -99,22 +106,25 @@ def create_fund(db, name, description=None, cnpj=None, is_qualified_only=False,
         (name, description, cnpj, int(is_qualified_only), initial_nav, initial_nav,
          returns_csv)
     )
-    db.commit()
+    if commit:
+        db.commit()
     return cur.lastrowid
 
 
-def delete_fund(db, fund_id):
+def delete_fund(db, fund_id, commit=True):
     db.execute("DELETE FROM fund_returns WHERE fund_id = ?", (fund_id,))
     db.execute("DELETE FROM funds WHERE id = ?", (fund_id,))
-    db.commit()
+    if commit:
+        db.commit()
 
 
-def update_fund(db, fund_id, name, description=None, cnpj=None, is_qualified_only=False):
+def update_fund(db, fund_id, name, description=None, cnpj=None, is_qualified_only=False, commit=True):
     db.execute(
         "UPDATE funds SET name = ?, description = ?, cnpj = ?, is_qualified_only = ? WHERE id = ?",
         (name, description, cnpj, int(is_qualified_only), fund_id)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_fund(db, fund_id):
@@ -136,37 +146,52 @@ def get_fund_returns(db, fund_id):
     ).fetchall()
 
 
-def parse_and_store_returns(db, fund_id, csv_path):
-    """Parse a two-column CSV (month, return) and store in fund_returns."""
+def parse_and_store_returns(db, fund_id, csv_path, commit=True):
+    """Parse a two-column CSV (month, return) and store in fund_returns.
+    Values with '%' suffix are divided by 100 (e.g., '1.5%' -> 0.015).
+    Bare decimals are stored as-is (e.g., '0.015' -> 0.015).
+    Raises ValueError if any value exceeds |50%| monthly (likely misformatted)."""
     db.execute("DELETE FROM fund_returns WHERE fund_id = ?", (fund_id,))
     with open(csv_path, 'r') as f:
         reader = csv.reader(f)
         header = next(reader, None)  # skip header
         for idx, row in enumerate(reader):
             if len(row) >= 2:
-                return_pct = float(row[1].strip().replace('%', '')) / 100 \
-                    if '%' in row[1] else float(row[1].strip())
+                raw = row[1].strip()
+                if '%' in raw:
+                    return_pct = float(raw.replace('%', '')) / 100
+                else:
+                    return_pct = float(raw)
+                # Sanity check: monthly returns > |50%| are almost certainly misformatted
+                if abs(return_pct) > 0.50:
+                    raise ValueError(
+                        f"Row {idx + 1}: monthly return {return_pct:.4f} ({return_pct*100:.1f}%) "
+                        f"exceeds 50% — likely a formatting error. Use decimal (0.01 = 1%) "
+                        f"or percent suffix ('1%')."
+                    )
                 db.execute(
                     "INSERT INTO fund_returns (fund_id, month_idx, return_pct) VALUES (?, ?, ?)",
                     (fund_id, idx, return_pct)
                 )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 # ---------------------------------------------------------------------------
 # Certificates
 # ---------------------------------------------------------------------------
 
-def create_certificate(db, user_id, plan_id, created_date, notes=None):
+def create_certificate(db, user_id, plan_id, created_date, notes=None, commit=True):
     cur = db.execute(
         "INSERT INTO certificates (user_id, plan_id, created_date, notes) VALUES (?, ?, ?, ?)",
         (user_id, plan_id, created_date, notes)
     )
-    db.commit()
+    if commit:
+        db.commit()
     return cur.lastrowid
 
 
-def delete_certificate(db, cert_id):
+def delete_certificate(db, cert_id, commit=True):
     db.execute("DELETE FROM lot_allocations WHERE contribution_id IN "
                "(SELECT id FROM contributions WHERE certificate_id = ?)", (cert_id,))
     db.execute("DELETE FROM contributions WHERE certificate_id = ?", (cert_id,))
@@ -175,7 +200,8 @@ def delete_certificate(db, cert_id):
     db.execute("DELETE FROM target_allocations WHERE certificate_id = ?", (cert_id,))
     db.execute("DELETE FROM requests WHERE certificate_id = ?", (cert_id,))
     db.execute("DELETE FROM certificates WHERE id = ?", (cert_id,))
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_certificate(db, cert_id):
@@ -201,21 +227,16 @@ def list_certificates(db, user_id=None):
     ).fetchall()
 
 
-def set_certificate_phase(db, cert_id, phase):
+def set_certificate_phase(db, cert_id, phase, commit=True):
     db.execute("UPDATE certificates SET phase = ? WHERE id = ?", (phase, cert_id))
-    db.commit()
+    if commit:
+        db.commit()
 
 
-def set_tax_regime(db, cert_id, regime, force=False):
-    """Set tax regime. Only succeeds if currently NULL (irrevocable once set).
-    Use force=True for admin override (sim-backend only)."""
-    if not force:
-        current = db.execute("SELECT tax_regime FROM certificates WHERE id = ?", (cert_id,)).fetchone()
-        if current and current['tax_regime'] is not None:
-            return False  # Already set, irrevocable
+def set_tax_regime(db, cert_id, regime, commit=True):
     db.execute("UPDATE certificates SET tax_regime = ? WHERE id = ?", (regime, cert_id))
-    db.commit()
-    return True
+    if commit:
+        db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +253,7 @@ def get_holdings(db, cert_id):
     ).fetchall()
 
 
-def set_holding(db, cert_id, fund_id, units):
+def set_holding(db, cert_id, fund_id, units, commit=True):
     if units <= 1e-9:
         db.execute(
             "DELETE FROM holdings WHERE certificate_id = ? AND fund_id = ?",
@@ -244,7 +265,8 @@ def set_holding(db, cert_id, fund_id, units):
                ON CONFLICT(certificate_id, fund_id) DO UPDATE SET units = ?""",
             (cert_id, fund_id, units, units)
         )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_certificate_total_value(db, cert_id):
@@ -262,19 +284,28 @@ def get_certificate_total_value(db, cert_id):
 # Target Allocations
 # ---------------------------------------------------------------------------
 
-def set_target_allocations(db, cert_id, allocations):
-    """allocations: list of (fund_id, pct) tuples."""
+def set_target_allocations(db, cert_id, allocations, commit=True):
+    """allocations: list of (fund_id, pct) tuples.
+    Validates: no negative pct, no pct > 100, total must be within [99.99, 100.01]."""
+    filtered = [(fid, pct) for fid, pct in allocations if pct > 0]
+    for fid, pct in filtered:
+        if pct < 0 or pct > 100:
+            raise ValueError(f"Invalid allocation pct {pct} for fund {fid}")
+    total_pct = sum(pct for _, pct in filtered)
+    if filtered and abs(total_pct - 100) > 0.01:
+        raise ValueError(f"Allocation percentages must sum to 100% (got {total_pct:.2f}%)")
     try:
         db.execute("DELETE FROM target_allocations WHERE certificate_id = ?", (cert_id,))
-        for fund_id, pct in allocations:
-            if pct > 0:
-                db.execute(
-                    "INSERT INTO target_allocations (certificate_id, fund_id, pct) VALUES (?, ?, ?)",
-                    (cert_id, fund_id, pct)
-                )
-        db.commit()
+        for fund_id, pct in filtered:
+            db.execute(
+                "INSERT INTO target_allocations (certificate_id, fund_id, pct) VALUES (?, ?, ?)",
+                (cert_id, fund_id, pct)
+            )
+        if commit:
+            db.commit()
     except Exception:
-        db.rollback()
+        if commit:
+            db.rollback()
         raise
 
 
@@ -293,17 +324,22 @@ def get_target_allocations(db, cert_id):
 
 def add_contribution(db, cert_id, amount, contribution_date, source_type='contribution',
                      remaining_amount=None, units_total=0.0, units_remaining=0.0,
-                     issue_unit_price=0.0, gross_amount=None):
+                     issue_unit_price=0.0, gross_amount=None, iof_amount=0.0,
+                     commit=True):
     if remaining_amount is None:
         remaining_amount = amount
+    if gross_amount is None:
+        gross_amount = amount
     cur = db.execute(
-        "INSERT INTO contributions (certificate_id, amount, gross_amount, remaining_amount, "
-        "contribution_date, source_type, units_total, units_remaining, issue_unit_price) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (cert_id, amount, gross_amount, remaining_amount, contribution_date, source_type,
-         units_total, units_remaining, issue_unit_price)
+        "INSERT INTO contributions (certificate_id, amount, remaining_amount, "
+        "contribution_date, source_type, gross_amount, iof_amount, "
+        "units_total, units_remaining, issue_unit_price) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (cert_id, amount, remaining_amount, contribution_date, source_type,
+         gross_amount, iof_amount, units_total, units_remaining, issue_unit_price)
     )
-    db.commit()
+    if commit:
+        db.commit()
     return cur.lastrowid
 
 
@@ -315,18 +351,21 @@ def list_contributions(db, cert_id):
 
 
 def total_contributions(db, cert_id):
+    """Sum of amount for user-paid contributions only (excludes transfers/portability)."""
     row = db.execute(
-        "SELECT COALESCE(SUM(amount), 0) as total FROM contributions WHERE certificate_id = ?",
+        "SELECT COALESCE(SUM(amount), 0) as total FROM contributions "
+        "WHERE certificate_id = ? AND source_type = 'contribution'",
         (cert_id,)
     ).fetchone()
     return row['total']
 
 
-def total_gross_contributions(db, cert_id):
-    """Sum of gross_amount (or amount if gross_amount is NULL) for contributions."""
+def total_invested_basis(db, cert_id):
+    """Total cost basis: sum of amount for ALL contribution sources (including transfers).
+    Use this for gain/loss calculation to avoid overstating gains when transfers exist."""
     row = db.execute(
-        "SELECT COALESCE(SUM(COALESCE(gross_amount, amount)), 0) as total "
-        "FROM contributions WHERE certificate_id = ?",
+        "SELECT COALESCE(SUM(amount), 0) as total FROM contributions "
+        "WHERE certificate_id = ?",
         (cert_id,)
     ).fetchone()
     return row['total']
@@ -342,9 +381,9 @@ def total_remaining_contributions(db, cert_id):
     return row['total']
 
 
-def consume_lots_fifo(db, cert_id, units_to_consume):
+def consume_lots_fifo(db, cert_id, units_to_consume, commit=True):
     """Consume oldest lots first by reducing units_remaining.
-    Also reduces remaining_amount proportionally to units consumed from each lot.
+    Also reduces remaining_amount proportionally.
     Returns list of dicts with units_consumed and consumed_amount per lot."""
     contributions = db.execute(
         "SELECT * FROM contributions WHERE certificate_id = ? AND units_remaining > 1e-9 "
@@ -363,16 +402,17 @@ def consume_lots_fifo(db, cert_id, units_to_consume):
         take_units = min(available_units, remaining_units)
         new_units_remaining = available_units - take_units
 
-        # Reduce remaining_amount proportionally to units consumed from this lot
+        # Reduce remaining_amount proportionally
         consumed_amount = c['remaining_amount'] * (take_units / available_units) if available_units > 1e-9 else c['remaining_amount']
-
         new_remaining_amount = c['remaining_amount'] - consumed_amount
 
-        # Epsilon cleanup: snap near-zero values to 0
+        # Bidirectional epsilon cleanup: if either is near-zero, zero both
         if new_units_remaining < 1e-9:
             new_units_remaining = 0.0
+            new_remaining_amount = 0.0
         if new_remaining_amount < 0.01:
             new_remaining_amount = 0.0
+            new_units_remaining = 0.0
 
         db.execute(
             "UPDATE contributions SET units_remaining = ?, remaining_amount = ? WHERE id = ?",
@@ -392,13 +432,23 @@ def consume_lots_fifo(db, cert_id, units_to_consume):
 
         remaining_units -= take_units
 
-    db.commit()
+    if commit:
+        db.commit()
+
+    # Verify all requested units were consumed
+    total_consumed = sum(c['units_consumed'] for c in consumed)
+    if abs(total_consumed - units_to_consume) > 1e-4 and remaining_units > 1e-4:
+        raise ValueError(
+            f"FIFO under-consumption: requested {units_to_consume:.6f} units, "
+            f"consumed {total_consumed:.6f} (shortfall {remaining_units:.6f})"
+        )
+
     return consumed
 
 
 def record_lot_allocations(db, outflow_type, outflow_id, consumed_lots,
                            current_date_str, tax_rate_fn=None, taxable_base_fn=None,
-                           tax_amount_fn=None):
+                           tax_amount_fn=None, commit=True):
     """Insert rows into lot_allocations for audit trail.
     consumed_lots: list from consume_lots_fifo.
     current_date_str: YYYY-MM-DD for computing days_held.
@@ -424,7 +474,8 @@ def record_lot_allocations(db, outflow_type, outflow_id, consumed_lots,
              lot['consumed_amount'], months_held, days_held,
              tax_rate, taxable_base, tax_amount)
         )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +483,7 @@ def record_lot_allocations(db, outflow_type, outflow_id, consumed_lots,
 # ---------------------------------------------------------------------------
 
 def add_withdrawal(db, cert_id, gross_amount, tax_withheld, net_amount,
-                   withdrawal_date, tax_details=None):
+                   withdrawal_date, tax_details=None, commit=True):
     cur = db.execute(
         """INSERT INTO withdrawals
            (certificate_id, gross_amount, tax_withheld, net_amount, withdrawal_date, tax_details)
@@ -440,7 +491,8 @@ def add_withdrawal(db, cert_id, gross_amount, tax_withheld, net_amount,
         (cert_id, gross_amount, tax_withheld, net_amount, withdrawal_date,
          json.dumps(tax_details) if tax_details else None)
     )
-    db.commit()
+    if commit:
+        db.commit()
     return cur.lastrowid
 
 
@@ -460,44 +512,45 @@ def get_brokerage_cash(db, user_id):
         "SELECT cash FROM brokerage_accounts WHERE user_id = ?", (user_id,)
     ).fetchone()
     if row is None:
+        # Use INSERT OR IGNORE to avoid commit that would break SAVEPOINT atomicity
         db.execute(
-            "INSERT INTO brokerage_accounts (user_id, cash) VALUES (?, 0.0)", (user_id,)
+            "INSERT OR IGNORE INTO brokerage_accounts (user_id, cash) VALUES (?, 0.0)", (user_id,)
         )
-        db.commit()
         return 0.0
     return row['cash']
 
 
-def set_brokerage_cash(db, user_id, amount):
+def set_brokerage_cash(db, user_id, amount, commit=True):
     db.execute(
         """INSERT INTO brokerage_accounts (user_id, cash) VALUES (?, ?)
            ON CONFLICT(user_id) DO UPDATE SET cash = ?""",
         (user_id, amount, amount)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
-def add_brokerage_cash(db, user_id, amount):
+def add_brokerage_cash(db, user_id, amount, commit=True):
     current = get_brokerage_cash(db, user_id)
-    set_brokerage_cash(db, user_id, current + amount)
+    set_brokerage_cash(db, user_id, current + amount, commit=commit)
 
 
 # ---------------------------------------------------------------------------
 # Requests
 # ---------------------------------------------------------------------------
 
-def create_request(db, user_id, cert_id, type_, details, created_date):
+def create_request(db, user_id, cert_id, type_, details, created_date, commit=True):
     cur = db.execute(
         """INSERT INTO requests (user_id, certificate_id, type, details, created_date)
            VALUES (?, ?, ?, ?, ?)""",
         (user_id, cert_id, type_, json.dumps(details) if details else None, created_date)
     )
-    db.commit()
+    if commit:
+        db.commit()
     return cur.lastrowid
 
 
-def list_requests(db, user_id=None, status=None, cert_id=None, type_=None,
-                   order='DESC'):
+def list_requests(db, user_id=None, status=None, cert_id=None, req_type=None):
     query = "SELECT * FROM requests WHERE 1=1"
     params = []
     if user_id is not None:
@@ -509,10 +562,14 @@ def list_requests(db, user_id=None, status=None, cert_id=None, type_=None,
     if cert_id is not None:
         query += " AND certificate_id = ?"
         params.append(cert_id)
-    if type_ is not None:
+    if req_type is not None:
         query += " AND type = ?"
-        params.append(type_)
-    query += f" ORDER BY created_date {order}, id {order}"
+        params.append(req_type)
+    # Pending requests processed in creation order (ASC); others shown newest-first
+    if status == 'pending':
+        query += " ORDER BY created_date ASC, id ASC"
+    else:
+        query += " ORDER BY id DESC"
     return db.execute(query, params).fetchall()
 
 
@@ -520,33 +577,37 @@ def get_request(db, req_id):
     return db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
 
 
-def complete_request(db, req_id, completed_date):
+def complete_request(db, req_id, completed_date, commit=True):
     db.execute(
         "UPDATE requests SET status = 'completed', completed_date = ? WHERE id = ?",
         (completed_date, req_id)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
-def fail_request(db, req_id):
+def fail_request(db, req_id, commit=True):
     db.execute("UPDATE requests SET status = 'failed' WHERE id = ?", (req_id,))
-    db.commit()
+    if commit:
+        db.commit()
 
 
-def reject_request(db, req_id, reason=None):
+def reject_request(db, req_id, reason=None, commit=True):
     db.execute(
         "UPDATE requests SET status = 'rejected', rejected_reason = ? WHERE id = ? AND status = 'pending'",
         (reason, req_id)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
-def cancel_request(db, req_id):
+def cancel_request(db, req_id, commit=True):
     db.execute(
         "UPDATE requests SET status = 'cancelled' WHERE id = ? AND status = 'pending'",
         (req_id,)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -558,12 +619,13 @@ def get_sim_month(db):
     return int(row['value']) if row else 0
 
 
-def set_sim_month(db, month):
+def set_sim_month(db, month, commit=True):
     db.execute(
         "INSERT OR REPLACE INTO sim_state (key, value) VALUES ('current_month', ?)",
         (str(month),)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_sim_date(db):
@@ -571,12 +633,13 @@ def get_sim_date(db):
     return row['value'] if row else '2026-01-01'
 
 
-def set_sim_date(db, date_str):
+def set_sim_date(db, date_str, commit=True):
     db.execute(
         "INSERT OR REPLACE INTO sim_state (key, value) VALUES ('current_date', ?)",
         (date_str,)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -590,14 +653,15 @@ def get_iof_declaration(db, user_id, year):
     return float(row['value']) if row else 0.0
 
 
-def set_iof_declaration(db, user_id, year, amount):
+def set_iof_declaration(db, user_id, year, amount, commit=True):
     """Set declared VGBL contributions at other issuers for a user in a given year."""
     key = f'iof_declared_{user_id}_{year}'
     db.execute(
         "INSERT OR REPLACE INTO sim_state (key, value) VALUES (?, ?)",
         (key, str(amount))
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -620,13 +684,23 @@ def get_external_portin_schedule(db):
     ]
 
 
-def set_external_portin_schedule(db, schedule):
-    """Set the external port-in schedule. schedule: list of {pct, years_ago}."""
+def set_external_portin_schedule(db, schedule, commit=True):
+    """Set the external port-in schedule. schedule: list of {pct, years_ago}.
+    Validates: pct must be positive, years_ago non-negative int, total pct must be 100%."""
+    for tranche in schedule:
+        if tranche.get('pct', 0) <= 0:
+            raise ValueError(f"Schedule tranche pct must be positive (got {tranche.get('pct')})")
+        if not isinstance(tranche.get('years_ago'), int) or tranche['years_ago'] < 0:
+            raise ValueError(f"Schedule years_ago must be non-negative int (got {tranche.get('years_ago')})")
+    total_pct = sum(t['pct'] for t in schedule)
+    if abs(total_pct - 100) > 0.01:
+        raise ValueError(f"Schedule percentages must sum to 100% (got {total_pct:.2f}%)")
     db.execute(
         "INSERT OR REPLACE INTO sim_state (key, value) VALUES ('external_portin_schedule', ?)",
         (json.dumps(schedule),)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -634,29 +708,24 @@ def set_external_portin_schedule(db, schedule):
 # ---------------------------------------------------------------------------
 
 def get_certificate_unit_price(db, cert_id):
-    """Compute unit_price = total_value / unit_supply.
-    Returns 1.0 if no units yet (new certificate).
-    Warns if unit_supply > 0 but total_value == 0 (invariant violation)."""
+    """Compute unit_price = total_value / unit_supply. Returns 1.0 if no units yet."""
     cert = db.execute("SELECT unit_supply FROM certificates WHERE id = ?", (cert_id,)).fetchone()
     if not cert or cert['unit_supply'] <= 1e-9:
         return 1.0
     total_value = get_certificate_total_value(db, cert_id)
     if total_value <= 0:
-        # Invariant violation: units exist but no holdings value
-        # Return small positive to avoid division by zero; callers should check
-        import logging
-        logging.warning(f"Certificate {cert_id}: unit_supply={cert['unit_supply']} but total_value=0")
         return 1.0
     return total_value / cert['unit_supply']
 
 
-def update_certificate_units(db, cert_id, delta):
+def update_certificate_units(db, cert_id, delta, commit=True):
     """Add (or subtract) from certificate's unit_supply. Clamped to >= 0."""
     db.execute(
         "UPDATE certificates SET unit_supply = max(0, unit_supply + ?) WHERE id = ?",
         (delta, cert_id)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_certificate_unit_supply(db, cert_id):
@@ -665,7 +734,7 @@ def get_certificate_unit_supply(db, cert_id):
     return row['unit_supply'] if row else 0.0
 
 
-def reconcile_certificate_units(db, cert_id):
+def reconcile_certificate_units(db, cert_id, commit=True):
     """Recompute unit_supply from sum of lot units_remaining.
     Returns (old_supply, new_supply). Only writes if there's a meaningful difference."""
     row = db.execute("SELECT unit_supply FROM certificates WHERE id = ?", (cert_id,)).fetchone()
@@ -675,10 +744,14 @@ def reconcile_certificate_units(db, cert_id):
         "FROM contributions WHERE certificate_id = ?",
         (cert_id,)
     ).fetchone()['total']
+    # Normalize near-zero values
+    if lot_sum < 1e-9:
+        lot_sum = 0.0
     if abs(old_supply - lot_sum) > 1e-6:
         db.execute("UPDATE certificates SET unit_supply = ? WHERE id = ?",
-                   (max(0, lot_sum), cert_id))
-        db.commit()
+                   (lot_sum, cert_id))
+        if commit:
+            db.commit()
     return old_supply, lot_sum
 
 
@@ -688,13 +761,14 @@ def get_vgbl_premium_remaining(db, cert_id):
     return row['vgbl_premium_remaining'] if row else 0.0
 
 
-def update_vgbl_premium_remaining(db, cert_id, delta):
+def update_vgbl_premium_remaining(db, cert_id, delta, commit=True):
     """Add (or subtract) from certificate's vgbl_premium_remaining."""
     db.execute(
         "UPDATE certificates SET vgbl_premium_remaining = max(0, vgbl_premium_remaining + ?) WHERE id = ?",
         (delta, cert_id)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -714,13 +788,21 @@ def get_iof_config(db):
     }
 
 
-def set_iof_config(db, config):
-    """Set IOF configuration."""
+def set_iof_config(db, config, commit=True):
+    """Set IOF configuration. Validates rate in [0,1], limit > 0, year_from <= year_to."""
+    for rule in config.get('thresholds', []):
+        if rule.get('limit', 0) <= 0:
+            raise ValueError(f"IOF limit must be positive (got {rule.get('limit')})")
+        if not (0.0 <= rule.get('rate', 0) <= 1.0):
+            raise ValueError(f"IOF rate must be between 0.0 and 1.0 (got {rule.get('rate')})")
+        if rule.get('year_from', 0) > rule.get('year_to', 0):
+            raise ValueError(f"IOF year_from must be <= year_to")
     db.execute(
         "INSERT OR REPLACE INTO sim_state (key, value) VALUES ('iof_config', ?)",
         (json.dumps(config),)
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_iof_limit_for_year(db, year):
@@ -745,35 +827,13 @@ def get_external_portin_gain_pct(db):
     return float(row['value']) if row else 0.80
 
 
-def set_external_portin_gain_pct(db, pct):
-    """Set the external port-in embedded gain percentage."""
+def set_external_portin_gain_pct(db, pct, commit=True):
+    """Set the external port-in embedded gain percentage. Must be in [0.0, 1.0]."""
+    if not (0.0 <= pct <= 1.0):
+        raise ValueError(f"embedded_gain_pct must be between 0.0 and 1.0 (got {pct})")
     db.execute(
         "INSERT OR REPLACE INTO sim_state (key, value) VALUES ('external_portin_embedded_gain_pct', ?)",
         (str(pct),)
     )
-    db.commit()
-
-
-# ---------------------------------------------------------------------------
-# Progressive Tax Brackets Config
-# ---------------------------------------------------------------------------
-
-def get_progressive_brackets(db):
-    """Get configurable progressive IRPF brackets from sim_state.
-    Returns list of [up_to, rate, deduction] triples.
-    Falls back to defaults if not configured."""
-    row = db.execute(
-        "SELECT value FROM sim_state WHERE key = 'progressive_brackets'"
-    ).fetchone()
-    if row:
-        return json.loads(row['value'])
-    return None  # use defaults
-
-
-def set_progressive_brackets(db, brackets):
-    """Set progressive IRPF brackets. brackets: list of [up_to, rate, deduction]."""
-    db.execute(
-        "INSERT OR REPLACE INTO sim_state (key, value) VALUES ('progressive_brackets', ?)",
-        (json.dumps(brackets),)
-    )
-    db.commit()
+    if commit:
+        db.commit()

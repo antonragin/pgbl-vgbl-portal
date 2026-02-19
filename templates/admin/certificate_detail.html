@@ -16,7 +16,11 @@
 <p>
     Total Value: <strong>R${{ "%.2f"|format(total_value) }}</strong> |
     Total Contributions: R${{ "%.2f"|format(total_contribs) }} |
+    {% if cert.plan_type == 'VGBL' %}
+    Premium Basis (P<sub>rem</sub>): R${{ "%.2f"|format(P_rem) }}
+    {% else %}
     Cost Basis (Remaining): R${{ "%.2f"|format(total_remaining) }}
+    {% endif %}
 </p>
 <p style="opacity:0.8">
     Unit Supply: <strong>{{ "%.6f"|format(unit_supply) }}</strong> |

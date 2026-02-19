@@ -28,7 +28,7 @@
         <div>
             <p>Unit Price: <strong>R${{ "%.6f"|format(unit_price) }}</strong> | Unit Supply: <strong>{{ "%.4f"|format(unit_supply) }}</strong></p>
             {% if cert.plan_type == 'VGBL' %}
-            <p>Taxable Earnings: <strong style="color:#4CAF50">R${{ "%.2f"|format(total_value - P_rem) }}</strong> ({{ "%.1f"|format((1 - P_rem / total_value) * 100 if total_value > 0 else 0) }}% of value)</p>
+            <p>Taxable Earnings: <strong style="color:#4CAF50">R${{ "%.2f"|format([0, total_value - P_rem]|max) }}</strong> ({{ "%.1f"|format([0, (1 - P_rem / total_value) * 100]|max if total_value > 0 else 0) }}% of value)</p>
             {% else %}
             <p>Total Earnings: <strong style="color:#4CAF50">R${{ "%.2f"|format(total_value - total_remaining) }}</strong></p>
             {% endif %}
@@ -74,6 +74,8 @@
                 <span style="color: #42A5F5">Transfer (internal)</span>
             {% elif lot.source_type == 'transfer_external' %}
                 <span style="color: #ff9800">Transfer (external)</span>
+            {% elif lot.source_type == 'portability' %}
+                <span style="color: #AB47BC">Portability</span>
             {% else %}
                 Regular
             {% endif %}
