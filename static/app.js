@@ -26,6 +26,3 @@ document.addEventListener('input', function(e) {
 function confirmAction(msg) {
     return confirm(msg);
 }
-
-
-################################################################################
