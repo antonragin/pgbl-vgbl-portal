@@ -6,7 +6,6 @@ from flask import (Flask, g, render_template, request, redirect,
 from database import get_db, init_db
 
 SITE_PASSWORD = os.environ.get('SITE_PASSWORD', 'OryxRulezzz2026!')
-VERSION_PREFIX = '/v14'
 
 
 def create_app():
@@ -21,8 +20,8 @@ def create_app():
     # Per-request DB connection + site-wide password gate
     @app.before_request
     def before_request():
-        # Allow the gate page, root redirect, and static files without auth
-        if request.endpoint in ('gate', 'root', 'static'):
+        # Allow the gate page and static files without auth
+        if request.endpoint in ('gate', 'static'):
             if request.endpoint != 'static':
                 g.db = get_db(app)
             return
@@ -37,7 +36,7 @@ def create_app():
             db.close()
 
     # --- Site-wide password gate ---
-    @app.route(f'{VERSION_PREFIX}/gate', methods=['GET', 'POST'])
+    @app.route('/gate', methods=['GET', 'POST'])
     def gate():
         if session.get('site_authenticated'):
             return redirect(url_for('landing'))
@@ -48,21 +47,16 @@ def create_app():
             flash('Incorrect password.', 'error')
         return render_template('gate.html')
 
-    # --- Register blueprints under /v14 ---
+    # Register blueprints
     from blueprints.admin import admin_bp
     from blueprints.portal import portal_bp
-    app.register_blueprint(admin_bp, url_prefix=f'{VERSION_PREFIX}/admin')
-    app.register_blueprint(portal_bp, url_prefix=f'{VERSION_PREFIX}/portal')
+    app.register_blueprint(admin_bp, url_prefix='/admin')
+    app.register_blueprint(portal_bp, url_prefix='/portal')
 
     # Landing page
-    @app.route(f'{VERSION_PREFIX}/')
+    @app.route('/')
     def landing():
         return render_template('landing.html')
-
-    # Root redirect
-    @app.route('/')
-    def root():
-        return redirect(url_for('landing'))
 
     return app
 
